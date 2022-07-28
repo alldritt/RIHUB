@@ -20,19 +20,27 @@ typealias RIImage = UIImage
 import CoreBluetooth
 
 
+extension Data {
+    struct HexEncodingOptions: OptionSet {
+        let rawValue: Int
+        static let upperCase = HexEncodingOptions(rawValue: 1 << 0)
+    }
+
+    func hexEncodedString(options: HexEncodingOptions = []) -> String {
+        let format = options.contains(.upperCase) ? "%02hhX" : "%02hhx"
+        return map { String(format: format, $0) }.joined()
+    }
+}
+
 //  Bluetooth UUID constants
+
+let LEGOWirelessProtocolHubServiceUUIDString = "00001623-1212-EFDE-1623-785FEABCD123"
+let LEGOWirelessProtocolHubCharacteristicUUIDString = "00001624-1212-EFDE-1623-785FEABCD123"
+
+let LEGOHubServiceUUIDString = "FEED"
 
 let SerialServiceUUIDString = "2456e1b9-26e2-8f83-e744-f34f01e9d701"
 let SerialCharacteristicUUIDString = "2456e1b9-26e2-8f83-e744-f34f01e9d703"
-
-
-//  Cognionics UUID constants
-
-let CGXServiceUUIDString = SerialServiceUUIDString // Cognionics Devices, which are Bluetooth serial devices
-
-let CGXImpedanceCheckOn = 0x11
-let CGXImpedanceCheckOff = 0x12
-
 
 extension Date {
     static var usecTimestamp : Int64 {
@@ -85,20 +93,22 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     static let RSSIChangeNotification = Notification.Name("RIHub.rssiChanged")
     static let BatteryChangeNotification = Notification.Name("RIHub.batteryChanged")
 
+    static let LEGOWirelessProtocolHubServiceUUID = CBUUID(string: LEGOWirelessProtocolHubServiceUUIDString)
+    static let LEGOWirelessProtocolHubCharacteristicUUID = CBUUID(string: LEGOWirelessProtocolHubCharacteristicUUIDString)
+
+    static let LEGOHubServiceUUID = CBUUID(string: LEGOHubServiceUUIDString)
+    
     static let SerialServiceUUID = CBUUID(string: SerialServiceUUIDString)
     static let SerialCharacteristicUUID = CBUUID(string: SerialCharacteristicUUIDString)
 
-    //static let CGXServiceUUID = CBUUID(string: CGXServiceUUIDString)
-    //static let MUSEServiceUUID = CBUUID(string: MUSEServiceUUIDString)
-
     static let DeviceLostInterval = TimeInterval(10)
     static let BatteryChangeInterval = TimeInterval(120) // 2 minutes
-    static let DroppedSamplesChangeInterval = TimeInterval(1.0 / 4.0)
     static let ConnectInterval = TimeInterval(10)
     static let RSSIReadInterval = TimeInterval(5)
 
     let centralManager: CBCentralManager
     let peripheral: CBPeripheral
+    let advertisementData: [String: Any]
     var lastSeen: Date
     var rssi: Int {
         didSet {
@@ -161,11 +171,14 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     }
     private (set) var dataLock = NSLock()
 
-    init(centralManager: CBCentralManager, peripheral: CBPeripheral, rssi: Int) {
+    init(centralManager: CBCentralManager, peripheral: CBPeripheral, advertisementData: [String : Any], rssi: Int) {
         self.centralManager = centralManager
         self.peripheral = peripheral
+        self.advertisementData = advertisementData
         self.lastSeen = Date()
         self.rssi = rssi
+        
+        print("advertisementData: \(advertisementData)")
     }
     
     deinit {
@@ -193,7 +206,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         
         if state != lastState {
             if state == .connected {
-                peripheral.discoverServices([/* Self.CGXServiceUUID, Self.MUSEServiceUUID */])
+                peripheral.discoverServices([/* Self.MUSEServiceUUID */])
             }
             //print("broadcastStateChange: \(peripheral)")
             lastState = state
@@ -229,7 +242,9 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         rssiTimer = Timer.scheduledTimer(withTimeInterval: Self.RSSIReadInterval,
                                          repeats: true,
                                          block: { [weak self] (_) in
-                                            self?.peripheral.readRSSI()
+            if self?.state == .connected {
+                self?.peripheral.readRSSI()
+            }
         })
         peripheral.delegate = self
         resetConnection()
@@ -262,30 +277,16 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         print("didDiscoverServices: \(String(describing: peripheral.services))")
         #endif
         
-        /*
-        //  CGX device?
-        if let cgxService = peripheral.services?.first(where: { (service) -> Bool in
-            return service.uuid == Self.CGXServiceUUID
+        if let legoWPHubService = peripheral.services?.first(where: { (service) -> Bool in
+            return service.uuid == Self.LEGOWirelessProtocolHubServiceUUID
         }) {
-            peripheral.discoverCharacteristics([Self.SerialCharacteristicUUID], for: cgxService)
+            peripheral.discoverCharacteristics([Self.LEGOWirelessProtocolHubCharacteristicUUID], for: legoWPHubService)
         }
-        
-        //  MUSE device?
-        if let museService = peripheral.services?.first(where: { (service) -> Bool in
-            return service.uuid == Self.MUSEServiceUUID
+        if let serialService = peripheral.services?.first(where: { (service) -> Bool in
+            return service.uuid == Self.LEGOHubServiceUUID
         }) {
-            print("museService: \(museService)")
-            peripheral.discoverCharacteristics([EEGMUSEHeadband.MUSEControlChacteristicUUID,
-                                                EEGMUSEHeadband.MUSETelemetryChacteristicUUID,
-                                                EEGMUSEHeadband.MUSEGyroscopeChacteristicUUID,
-                                                EEGMUSEHeadband.MUSEAccelerometerChacteristicUUID,
-                                                EEGMUSEHeadband.MUSEEEG0ChacteristicUUID,
-                                                EEGMUSEHeadband.MUSEEEG1ChacteristicUUID,
-                                                EEGMUSEHeadband.MUSEEEG2ChacteristicUUID,
-                                                EEGMUSEHeadband.MUSEEEG3ChacteristicUUID,
-                                                EEGMUSEHeadband.MUSEEEG4ChacteristicUUID], for: museService)
+            peripheral.discoverCharacteristics([Self.SerialCharacteristicUUID], for: serialService)
         }
-         */
     }
         
     func peripheralDidUpdateName(_ peripheral: CBPeripheral) {
@@ -309,6 +310,17 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         #if DEBUG
         print("didDiscoverCharacteristicsFor: \(service), \(String(describing: service.characteristics))")
         #endif
+        
+        if let hub = service.characteristics?.first(where: { (characteristic) -> Bool in
+            return characteristic.uuid == Self.LEGOWirelessProtocolHubCharacteristicUUID
+        }) {
+            peripheral.setNotifyValue(true, for: hub)
+        }
+        if let serial = service.characteristics?.first(where: { (characteristic) -> Bool in
+            return characteristic.uuid == Self.SerialCharacteristicUUID
+        }) {
+            peripheral.setNotifyValue(true, for: serial)
+        }
     }
     
     func peripheral(_ peripheral: CBPeripheral, didDiscoverIncludedServicesFor service: CBService, error: Error?) {
@@ -327,6 +339,21 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         #if DEBUG
         print("didUpdateValueFor: \(characteristic), error: \(String(describing: error))")
         #endif
+        
+        switch characteristic.uuid {
+        case Self.LEGOWirelessProtocolHubCharacteristicUUID:
+            if let data = characteristic.value {
+                print(data.hexEncodedString())
+            }
+            
+        case Self.SerialCharacteristicUUID:
+            if let data = characteristic.value {
+                print(data.hexEncodedString())
+            }
+            
+        default:
+            print("unknown characteristic...")
+        }
     }
     
     //  Mark: - Equitable

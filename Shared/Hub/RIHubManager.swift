@@ -14,8 +14,8 @@ import CoreBluetooth
 
 class RIHubManager: NSObject {
     
-    static let LEGOHubServiceUUIDString = "FEED"
-    static let LEGOHubServiceUUID = CBUUID(string: LEGOHubServiceUUIDString)
+    //static let LEGOHubServiceUUIDString = "FEED"
+    //static let LEGOHubServiceUUID = CBUUID(string: LEGOHubServiceUUIDString)
 
     static let DevicesChangedNotification = Notification.Name("RIHubManager.DevicesChangedNotification")
     static let BluetoothStateChangedNotification = Notification.Name("RIHubManager.BluetoothStateChangedNotification")
@@ -138,7 +138,9 @@ extension RIHubManager: CBCentralManagerDelegate {
             print("central.state is .poweredOn")
             if isRunning {
                 print("  - listening for devices...")
-                centralManager.scanForPeripherals(withServices: [Self.LEGOHubServiceUUID],
+                centralManager.scanForPeripherals(withServices: [RIHub.LEGOHubServiceUUID,
+                                                                 RIHub.LEGOWirelessProtocolHubServiceUUID,
+                                                                 RIHub.SerialServiceUUID],
                                                   options: [CBCentralManagerScanOptionAllowDuplicatesKey:1])
                 DispatchQueue.main.async {
                     self.timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true, block: self.timerFired)
@@ -161,13 +163,20 @@ extension RIHubManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         Self.uuids.insert(peripheral.identifier)
         
-        if Self.uuids != Self.lastuuids {
-            print("uuids: \(Self.uuids)")
+        //if Self.uuids != Self.lastuuids {
+        //    print("uuids: \(Self.uuids)")
             print("didDiscover: \(peripheral), advertisementData: \(advertisementData), rssi: \(RSSI), when: \(Date())")
-            Self.lastuuids = Self.uuids
-        }
+        //    Self.lastuuids = Self.uuids
+        //}
                 
         DispatchQueue.main.async {
+            //print("advertisementData: \(peripheral.name ?? "unknown") - \(advertisementData) - \(advertisementData["kCBAdvDataServiceUUIDs"] as? [CBUUID])")
+            /*
+            if let data = advertisementData["kCBAdvDataManufacturerData"] as? Data {
+                print("kCBAdvDataManufacturerData: \(data.hexEncodedString())")
+            }
+            */
+            
             if let hub = self.devices[peripheral.identifier] {
                 hub.lastSeen = Date()
                 hub.rssi = RSSI.intValue
@@ -176,6 +185,12 @@ extension RIHubManager: CBCentralManagerDelegate {
             else {
                 print("didDiscover: \(peripheral), advertisementData: \(advertisementData), rssi: \(RSSI), when: \(Date())")
                 
+                self.devices[peripheral.identifier] = RIHub(centralManager: self.centralManager,
+                                                            peripheral: peripheral,
+                                                            advertisementData: advertisementData,
+                                                            rssi: RSSI.intValue)
+
+                /*
                 if peripheral.name?.contains("LEGO") == true ||
                     (advertisementData["kCBAdvDataLocalName"] as? String)?.contains("LEGO") == true {
                     print("found it!")
@@ -183,8 +198,8 @@ extension RIHubManager: CBCentralManagerDelegate {
                 if let serviceUUIDs = advertisementData["kCBAdvDataServiceUUIDs"] as? [CBUUID],
                     serviceUUIDs.contains(Self.LEGOHubServiceUUID) {
                     
-                    self.devices[peripheral.identifier] = RIHub(centralManager: self.centralManager, peripheral: peripheral, rssi: RSSI.intValue)
                 }
+                */
             }
         }
     }
