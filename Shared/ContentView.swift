@@ -32,7 +32,7 @@ struct FilledButton: View {
         #elseif os(iOS)
         let w = UIScreen.main.bounds.size.width
         #elseif os(macOS)
-        let w = NSScreen.main.bounds.size.width
+        let w = NSScreen.main?.frame.size.width ?? 800
         #endif
 
         return w * 0.8 // 80%
@@ -155,9 +155,20 @@ struct HubView: View {
                                         .frame(width: 80, height: 80)
                                     Text(hub.deviceName)
                                 }
-                                #else
+                                #elseif os(iOS)
                                 HStack {
                                     Image(uiImage: image)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fit)
+                                        .frame(width: 80, height: 80)
+                                        .padding(.trailing, 10)
+                                    VStack(alignment: .leading) {
+                                        Text(hub.deviceName)
+                                    }
+                                }
+                                #elseif os(macOS)
+                                HStack {
+                                    Image(nsImage: image)
                                         .resizable()
                                         .aspectRatio(contentMode: .fit)
                                         .frame(width: 80, height: 80)

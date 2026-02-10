@@ -10,7 +10,7 @@
 import Cocoa
 
 typealias RIColor = NSColor
-typealias RIImage = NSIMage
+typealias RIImage = NSImage
 #else
 import UIKit
 
@@ -92,6 +92,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     static let StateChangeNotification = Notification.Name("RIHub.stateChanged")
     static let RSSIChangeNotification = Notification.Name("RIHub.rssiChanged")
     static let BatteryChangeNotification = Notification.Name("RIHub.batteryChanged")
+    static let AttachedDevicesChangedNotification = Notification.Name("RIHub.attachedDevicesChanged")
 
     static let LEGOWirelessProtocolHubServiceUUID = CBUUID(string: LEGOWirelessProtocolHubServiceUUIDString)
     static let LEGOWirelessProtocolHubCharacteristicUUID = CBUUID(string: LEGOWirelessProtocolHubCharacteristicUUIDString)
@@ -157,8 +158,10 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     private var started: Date?
     private var connectDate = Date.distantPast
     private var rssiTimer: Timer?
-    private (set) var realSampleCount = 0
-    private (set) var batteryv = Double(0) {
+    private var lwpCharacteristic: CBCharacteristic?
+    private(set) var attachedDevices: [UInt8: LWP3IODeviceType] = [:]
+    private(set) var realSampleCount = 0
+    private(set) var batteryv = Double(0) {
         didSet {
             let now = Date()
             if batteryv != oldValue && (oldValue == 0 || now.timeIntervalSince(lastBatteryChange) >= Self.BatteryChangeInterval) {
@@ -169,7 +172,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
             }
         }
     }
-    private (set) var dataLock = NSLock()
+    private(set) var dataLock = NSLock()
 
     init(centralManager: CBCentralManager, peripheral: CBPeripheral, advertisementData: [String : Any], rssi: Int) {
         self.centralManager = centralManager
@@ -232,10 +235,62 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         realSampleCount = 0
         batteryv = 0
         lastBatteryChange = Date.distantPast
+        lwpCharacteristic = nil
+        attachedDevices.removeAll()
         resetDevice()
     }
     
     func resetDevice() { // subclass responsibility
+    }
+
+    // MARK: - LWP3 Protocol
+
+    func send(_ command: Data) {
+        guard let characteristic = lwpCharacteristic else {
+            #if DEBUG
+            print("LWP3: Cannot send — no LWP characteristic")
+            #endif
+            return
+        }
+        peripheral.writeValue(command, for: characteristic, type: .withResponse)
+    }
+
+    private func handleLWP3Message(_ data: Data) {
+        guard let message = LWP3Message.parse(from: data) else {
+            #if DEBUG
+            print("LWP3: Failed to parse: \(data.hexEncodedString())")
+            #endif
+            return
+        }
+
+        #if DEBUG
+        print("LWP3: \(message)")
+        #endif
+
+        switch message {
+        case .hubAttachedIO(let portID, let event, let deviceType, _, _, _, _):
+            switch event {
+            case .attached, .attachedVirtual:
+                if let deviceType = deviceType {
+                    attachedDevices[portID] = deviceType
+                }
+            case .detached:
+                attachedDevices.removeValue(forKey: portID)
+            }
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: Self.AttachedDevicesChangedNotification, object: self)
+            }
+
+        case .hubProperty(let property, let operation, let payload):
+            if property == .batteryVoltage && operation == .update {
+                if let level = payload.first {
+                    batteryv = Double(level)
+                }
+            }
+
+        default:
+            break
+        }
     }
     
     private func connectPart2() {
@@ -314,7 +369,12 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         if let hub = service.characteristics?.first(where: { (characteristic) -> Bool in
             return characteristic.uuid == Self.LEGOWirelessProtocolHubCharacteristicUUID
         }) {
+            lwpCharacteristic = hub
             peripheral.setNotifyValue(true, for: hub)
+
+            // Request battery level and subscribe to updates
+            send(LWP3Command.requestHubProperty(.batteryVoltage))
+            send(LWP3Command.enableHubPropertyUpdates(.batteryVoltage))
         }
         if let serial = service.characteristics?.first(where: { (characteristic) -> Bool in
             return characteristic.uuid == Self.SerialCharacteristicUUID
@@ -343,16 +403,20 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         switch characteristic.uuid {
         case Self.LEGOWirelessProtocolHubCharacteristicUUID:
             if let data = characteristic.value {
-                print(data.hexEncodedString())
+                handleLWP3Message(data)
             }
-            
+
         case Self.SerialCharacteristicUUID:
             if let data = characteristic.value {
-                print(data.hexEncodedString())
+                #if DEBUG
+                print("Serial: \(data.hexEncodedString())")
+                #endif
             }
-            
+
         default:
+            #if DEBUG
             print("unknown characteristic...")
+            #endif
         }
     }
     

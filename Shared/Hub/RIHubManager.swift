@@ -20,8 +20,8 @@ class RIHubManager: NSObject {
     static let DevicesChangedNotification = Notification.Name("RIHubManager.DevicesChangedNotification")
     static let BluetoothStateChangedNotification = Notification.Name("RIHubManager.BluetoothStateChangedNotification")
     
-    private (set) var isRunning = false
-    private (set) var devices: [UUID:RIHub] = [:] {
+    private(set) var isRunning = false
+    private(set) var devices: [UUID:RIHub] = [:] {
         didSet {
             if devices != oldValue {
                 NotificationCenter.default.post(name: Self.DevicesChangedNotification, object: self)
@@ -40,7 +40,7 @@ class RIHubManager: NSObject {
         return centralManager?.state ?? .unknown
     }
     
-    private let queue = DispatchQueue(label: "EEG")
+    private let queue = DispatchQueue(label: "LEGO")
     private var centralManager: CBCentralManager!
     private var timer: Timer?
     
