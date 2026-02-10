@@ -292,7 +292,11 @@ struct SPIKEDeviceNotification {
                 offset += 11
 
             default:
-                // Unknown sub-message — can't continue parsing
+                // Unknown sub-message — log and stop (can't skip without knowing size)
+                let remaining = Data(payload[offset...])
+                #if DEBUG
+                print("SPIKE DeviceNotification: unknown sub-message ID 0x\(String(format: "%02X", msgID)) at offset \(offset - payload.startIndex), remaining \(remaining.count) bytes: \(remaining.hexEncodedString())")
+                #endif
                 return SPIKEDeviceNotification(battery: battery, motors: motors, distances: distances, colors: colors, forces: forces, lightMatrices: lightMatrices)
             }
         }

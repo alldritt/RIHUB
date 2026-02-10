@@ -132,7 +132,7 @@ struct ConnectedView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(ports, id: \.self) { port in
-                        PortRowView(snapshot: snap, port: port)
+                        PortRowView(snapshot: snap, port: port, hub: hub)
                     }
                     if ports.isEmpty {
                         Text("No devices attached")
@@ -199,6 +199,7 @@ struct BatteryIndicator: View {
 struct PortRowView: View {
     let snapshot: RIHub.DeviceDataSnapshot
     let port: UInt8
+    let hub: RIHub?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -207,7 +208,7 @@ struct PortRowView: View {
                 .frame(width: 52, alignment: .leading)
 
             if let motor = snapshot.motors[port] {
-                MotorRowView(motor: motor)
+                MotorRowView(motor: motor, hub: hub)
             }
             if let dist = snapshot.distances[port] {
                 DistanceRowView(distance: dist)
@@ -232,6 +233,9 @@ struct PortRowView: View {
 
 struct MotorRowView: View {
     let motor: SPIKEDeviceNotification.Motor
+    let hub: RIHub?
+
+    @State private var sliderSpeed: Double = 0
 
     var body: some View {
         HStack(spacing: 6) {
@@ -242,6 +246,31 @@ struct MotorRowView: View {
                 .font(.system(.subheadline, design: .monospaced))
             Text("pos:\(motor.position)")
                 .font(.system(.subheadline, design: .monospaced))
+
+            if let hub = hub, hub.canControlMotors {
+                Slider(value: $sliderSpeed, in: -100...100, step: 1) {
+                    Text("Speed")
+                }
+                .frame(minWidth: 100, maxWidth: 160)
+                .onChange(of: sliderSpeed) { newValue in
+                    let speed = Int8(clamping: Int(newValue))
+                    if speed == 0 {
+                        hub.sendLWP3(LWP3Command.motorBrake(portID: motor.port))
+                    } else {
+                        hub.sendLWP3(LWP3Command.motorStartSpeed(portID: motor.port, speed: speed))
+                    }
+                }
+
+                Button {
+                    sliderSpeed = 0
+                    hub.sendLWP3(LWP3Command.motorBrake(portID: motor.port))
+                } label: {
+                    Text("Stop")
+                        .font(.subheadline)
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.borderless)
+            }
         }
     }
 }

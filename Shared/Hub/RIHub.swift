@@ -315,6 +315,23 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
 
     // MARK: - LWP3 Protocol
 
+    /// Whether LWP3 motor commands are available (hub exposes 1623 service).
+    var canControlMotors: Bool {
+        lwpCharacteristic != nil
+    }
+
+    /// Send an LWP3 command directly to the LWP3 characteristic (for motor control).
+    /// Bypasses SPIKE routing — use this for motor commands when both protocols are active.
+    func sendLWP3(_ command: Data) {
+        guard let characteristic = lwpCharacteristic else {
+            #if DEBUG
+            print("LWP3: Cannot send — no LWP characteristic (motor control unavailable)")
+            #endif
+            return
+        }
+        peripheral.writeValue(command, for: characteristic, type: .withResponse)
+    }
+
     func send(_ command: Data) {
         if usingSPIKEProtocol {
             sendSPIKE(command)
@@ -405,7 +422,13 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
                 if let battery = notification.battery {
                     batteryv = Double(battery.level)
                 }
+                // Each notification is a complete snapshot — replace all device state
                 dataLock.lock()
+                spikeMotors.removeAll()
+                spikeDistances.removeAll()
+                spikeColors.removeAll()
+                spikeForces.removeAll()
+                spikeLightMatrices.removeAll()
                 for motor in notification.motors {
                     spikeMotors[motor.port] = motor
                 }
@@ -444,6 +467,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
                 for light in notification.lightMatrices {
                     print("SPIKE: Light port=\(light.port) pixels=\(light.pixels)")
                 }
+                print("SPIKE: Summary — motors=\(notification.motors.count) dist=\(notification.distances.count) color=\(notification.colors.count) force=\(notification.forces.count) light=\(notification.lightMatrices.count) battery=\(notification.battery != nil)")
                 #endif
             }
 
@@ -618,6 +642,11 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
                 setupLWPCharacteristic(hub)
             }
         }
+
+        #if DEBUG
+        let services = peripheral.services?.map { $0.uuid.uuidString } ?? []
+        print("Services discovered: \(services) | SPIKE=\(usingSPIKEProtocol) LWP3=\(lwpCharacteristic != nil) motorControl=\(canControlMotors)")
+        #endif
     }
 
     private func setupLWPCharacteristic(_ characteristic: CBCharacteristic) {
