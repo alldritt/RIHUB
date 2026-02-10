@@ -101,20 +101,241 @@ struct BluetoothUnauthorizedView: View {
 }
 
 struct ConnectedView: View {
-    
+
     private let hub: RIHub
+    @State private var snapshot: RIHub.DeviceDataSnapshot?
+    @State private var batteryLevel: Int?
 
     init(_ hub: RIHub) {
         self.hub = hub
     }
 
     var body: some View {
-        VStack {
-            Text("Connected")
-            Button("Disconnect",
-                   action: {
-                    hub.disconnect()
-                   })
+        let snap = snapshot ?? hub.deviceDataSnapshot()
+        let ports = snap.activePorts
+
+        VStack(spacing: 0) {
+            // Header: hub name + battery
+            HStack {
+                Text(hub.deviceName)
+                    .font(.headline)
+                Spacer()
+                if let level = batteryLevel ?? hub.batteryLevel {
+                    BatteryIndicator(level: level)
+                }
+            }
+            .padding()
+
+            Divider()
+
+            // Per-port device rows
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(ports, id: \.self) { port in
+                        PortRowView(snapshot: snap, port: port)
+                    }
+                    if ports.isEmpty {
+                        Text("No devices attached")
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+            }
+
+            Divider()
+
+            // Disconnect button
+            FilledButton(title: "Disconnect") {
+                hub.disconnect()
+            }
+            .padding()
+        }
+        .onReceive(NotificationCenter.default
+            .publisher(for: RIHub.DeviceDataChangedNotification, object: hub)) { _ in
+            snapshot = hub.deviceDataSnapshot()
+            batteryLevel = hub.batteryLevel
+        }
+        .onReceive(NotificationCenter.default
+            .publisher(for: RIHub.BatteryChangeNotification, object: hub)) { _ in
+            batteryLevel = hub.batteryLevel
+        }
+    }
+}
+
+// MARK: - Battery Indicator
+
+struct BatteryIndicator: View {
+    let level: Int
+
+    private var color: Color {
+        if level > 50 { return .green }
+        if level > 20 { return .yellow }
+        return .red
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("\(level)%")
+                .font(.system(.subheadline, design: .monospaced))
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .stroke(Color.secondary, lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(color)
+                        .frame(width: max(0, geo.size.width * CGFloat(level) / 100.0))
+                }
+            }
+            .frame(width: 30, height: 12)
+        }
+    }
+}
+
+// MARK: - Per-Port Row
+
+struct PortRowView: View {
+    let snapshot: RIHub.DeviceDataSnapshot
+    let port: UInt8
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Port \(RIHub.portLetter(port))")
+                .font(.subheadline.bold())
+                .frame(width: 52, alignment: .leading)
+
+            if let motor = snapshot.motors[port] {
+                MotorRowView(motor: motor)
+            }
+            if let dist = snapshot.distances[port] {
+                DistanceRowView(distance: dist)
+            }
+            if let color = snapshot.colors[port] {
+                ColorRowView(color: color)
+            }
+            if let force = snapshot.forces[port] {
+                ForceRowView(force: force)
+            }
+            if let light = snapshot.lightMatrices[port] {
+                LightMatrixRowView(light: light)
+            }
+
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Device Type Views
+
+struct MotorRowView: View {
+    let motor: SPIKEDeviceNotification.Motor
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("Motor")
+                .foregroundColor(.secondary)
+                .font(.subheadline)
+            Text("spd:\(motor.speed)")
+                .font(.system(.subheadline, design: .monospaced))
+            Text("pos:\(motor.position)")
+                .font(.system(.subheadline, design: .monospaced))
+        }
+    }
+}
+
+struct DistanceRowView: View {
+    let distance: SPIKEDeviceNotification.Distance
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("Distance")
+                .foregroundColor(.secondary)
+                .font(.subheadline)
+            if distance.distanceMM < 0 {
+                Text("—")
+                    .font(.subheadline)
+            } else {
+                Text("\(distance.distanceMM)mm")
+                    .font(.system(.subheadline, design: .monospaced))
+            }
+        }
+    }
+}
+
+struct ColorRowView: View {
+    let color: SPIKEDeviceNotification.Color
+
+    private var swatchColor: SwiftUI.Color {
+        SwiftUI.Color(
+            red: Double(color.red) / 1024.0,
+            green: Double(color.green) / 1024.0,
+            blue: Double(color.blue) / 1024.0
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("Color")
+                .foregroundColor(.secondary)
+                .font(.subheadline)
+            Circle()
+                .fill(swatchColor)
+                .frame(width: 12, height: 12)
+            if color.colorID >= 0 {
+                Text("id:\(color.colorID)")
+                    .font(.system(.subheadline, design: .monospaced))
+            } else {
+                Text("—")
+                    .font(.subheadline)
+            }
+        }
+    }
+}
+
+struct ForceRowView: View {
+    let force: SPIKEDeviceNotification.Force
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("Force")
+                .foregroundColor(.secondary)
+                .font(.subheadline)
+            Text("\(force.force)")
+                .font(.system(.subheadline, design: .monospaced))
+            if force.pressed != 0 {
+                Image(systemName: "hand.point.down.fill")
+                    .font(.subheadline)
+                    .foregroundColor(.orange)
+            }
+        }
+    }
+}
+
+struct LightMatrixRowView: View {
+    let light: SPIKEDeviceNotification.LightMatrix
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("Light")
+                .foregroundColor(.secondary)
+                .font(.subheadline)
+            // 3x3 grid of brightness dots
+            VStack(spacing: 2) {
+                ForEach(0..<3, id: \.self) { row in
+                    HStack(spacing: 2) {
+                        ForEach(0..<3, id: \.self) { col in
+                            let idx = row * 3 + col
+                            let brightness = idx < light.pixels.count ? Double(light.pixels[idx]) / 100.0 : 0
+                            Circle()
+                                .fill(Color.white.opacity(brightness))
+                                .frame(width: 6, height: 6)
+                        }
+                    }
+                }
+            }
         }
     }
 }

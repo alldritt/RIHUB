@@ -97,6 +97,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     static let RSSIChangeNotification = Notification.Name("RIHub.rssiChanged")
     static let BatteryChangeNotification = Notification.Name("RIHub.batteryChanged")
     static let AttachedDevicesChangedNotification = Notification.Name("RIHub.attachedDevicesChanged")
+    static let DeviceDataChangedNotification = Notification.Name("RIHub.deviceDataChanged")
 
     static let LEGOWirelessProtocolHubServiceUUID = CBUUID(string: LEGOWirelessProtocolHubServiceUUIDString)
     static let LEGOWirelessProtocolHubCharacteristicUUID = CBUUID(string: LEGOWirelessProtocolHubCharacteristicUUIDString)
@@ -172,6 +173,54 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     private(set) var spikeInfo: SPIKEInfoResponse?
     private(set) var usingSPIKEProtocol = false
     private(set) var attachedDevices: [UInt8: LWP3IODeviceType] = [:]
+
+    // SPIKE device state — updated from DeviceNotification (0x3C)
+    private(set) var spikeMotors: [UInt8: SPIKEDeviceNotification.Motor] = [:]
+    private(set) var spikeDistances: [UInt8: SPIKEDeviceNotification.Distance] = [:]
+    private(set) var spikeColors: [UInt8: SPIKEDeviceNotification.Color] = [:]
+    private(set) var spikeForces: [UInt8: SPIKEDeviceNotification.Force] = [:]
+    private(set) var spikeLightMatrices: [UInt8: SPIKEDeviceNotification.LightMatrix] = [:]
+
+    /// Battery level as integer percentage (0–100), or nil if not yet received.
+    var batteryLevel: Int? {
+        batteryv > 0 ? Int(batteryv) : nil
+    }
+
+    /// Thread-safe snapshot of all current device data.
+    func deviceDataSnapshot() -> DeviceDataSnapshot {
+        dataLock.lock()
+        defer { dataLock.unlock() }
+        return DeviceDataSnapshot(
+            motors: spikeMotors,
+            distances: spikeDistances,
+            colors: spikeColors,
+            forces: spikeForces,
+            lightMatrices: spikeLightMatrices
+        )
+    }
+
+    struct DeviceDataSnapshot {
+        let motors: [UInt8: SPIKEDeviceNotification.Motor]
+        let distances: [UInt8: SPIKEDeviceNotification.Distance]
+        let colors: [UInt8: SPIKEDeviceNotification.Color]
+        let forces: [UInt8: SPIKEDeviceNotification.Force]
+        let lightMatrices: [UInt8: SPIKEDeviceNotification.LightMatrix]
+
+        var activePorts: [UInt8] {
+            let ports = Set(motors.keys)
+                .union(distances.keys)
+                .union(colors.keys)
+                .union(forces.keys)
+                .union(lightMatrices.keys)
+            return ports.sorted()
+        }
+    }
+
+    /// Convert port number (0–5) to letter (A–F).
+    static func portLetter(_ port: UInt8) -> String {
+        guard let scalar = UnicodeScalar(Int(port) + 65) else { return "?" }
+        return String(Character(scalar))
+    }
     private(set) var realSampleCount = 0
     private(set) var batteryv = Double(0) {
         didSet {
@@ -253,6 +302,11 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         spikeInfo = nil
         usingSPIKEProtocol = false
         attachedDevices.removeAll()
+        spikeMotors.removeAll()
+        spikeDistances.removeAll()
+        spikeColors.removeAll()
+        spikeForces.removeAll()
+        spikeLightMatrices.removeAll()
         resetDevice()
     }
     
@@ -351,6 +405,26 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
                 if let battery = notification.battery {
                     batteryv = Double(battery.level)
                 }
+                dataLock.lock()
+                for motor in notification.motors {
+                    spikeMotors[motor.port] = motor
+                }
+                for dist in notification.distances {
+                    spikeDistances[dist.port] = dist
+                }
+                for color in notification.colors {
+                    spikeColors[color.port] = color
+                }
+                for force in notification.forces {
+                    spikeForces[force.port] = force
+                }
+                for light in notification.lightMatrices {
+                    spikeLightMatrices[light.port] = light
+                }
+                dataLock.unlock()
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: Self.DeviceDataChangedNotification, object: self)
+                }
                 #if DEBUG
                 if let battery = notification.battery {
                     print("SPIKE: Battery=\(battery.level)%")
@@ -366,6 +440,9 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
                 }
                 for force in notification.forces {
                     print("SPIKE: Force port=\(force.port) force=\(force.force) pressed=\(force.pressed)")
+                }
+                for light in notification.lightMatrices {
+                    print("SPIKE: Light port=\(light.port) pixels=\(light.pixels)")
                 }
                 #endif
             }
@@ -390,42 +467,6 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
             #if DEBUG
             print("SPIKE RX: unhandled message type 0x\(String(format: "%02X", msgType))")
             #endif
-        }
-    }
-
-    // MARK: - BLE REPL Experiment
-
-    /// Write raw bytes to the first writable characteristic (for REPL probing).
-    func writeRaw(_ data: Data) {
-        guard let service = peripheral.services?.first,
-              let char = service.characteristics?.first(where: {
-                  $0.properties.contains(.write) || $0.properties.contains(.writeWithoutResponse)
-              }) else {
-            print("BLE REPL: No writable characteristic")
-            return
-        }
-        let type: CBCharacteristicWriteType = char.properties.contains(.write) ? .withResponse : .withoutResponse
-        peripheral.writeValue(data, for: char, type: type)
-        print("BLE REPL: Wrote \(data.count) bytes: \(data.hexEncodedString())")
-    }
-
-    /// Send a string as UTF-8 + carriage return to the REPL characteristic.
-    func writeREPL(_ command: String) {
-        guard let data = (command + "\r").data(using: .utf8) else { return }
-        writeRaw(data)
-    }
-
-    /// Probe the hub REPL: send Ctrl+C, then a command to show "HI" on the LED matrix.
-    /// If the hub's display changes, we know we're talking to MicroPython.
-    func probeREPL() {
-        print("BLE REPL: ── Probing hub REPL ──")
-
-        // Ctrl+C to break any running program
-        writeRaw(Data([0x03]))
-
-        // Small delay then try to show something on the display
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.writeREPL("import hub; hub.display.show('HI')")
         }
     }
 

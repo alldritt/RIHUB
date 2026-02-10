@@ -195,11 +195,17 @@ struct SPIKEDeviceNotification {
         let pressed: UInt8
     }
 
+    struct LightMatrix {
+        let port: UInt8
+        let pixels: [UInt8]  // 9 brightness values (0–100), row-major 3x3
+    }
+
     let battery: Battery?
     let motors: [Motor]
     let distances: [Distance]
     let colors: [Color]
     let forces: [Force]
+    let lightMatrices: [LightMatrix]
 
     /// Parse from raw (COBS-decoded) message bytes.
     static func parse(from data: Data) -> SPIKEDeviceNotification? {
@@ -213,6 +219,7 @@ struct SPIKEDeviceNotification {
         var distances: [Distance] = []
         var colors: [Color] = []
         var forces: [Force] = []
+        var lightMatrices: [LightMatrix] = []
 
         var offset = payload.startIndex
         while offset < payload.endIndex {
@@ -275,17 +282,22 @@ struct SPIKEDeviceNotification {
                 guard offset + 26 <= payload.endIndex else { break }
                 offset += 26
 
-            case 0x0E: // 3x3 display: <BB9B = 11 bytes
+            case 0x0E: // 3x3 light matrix: <BB9B = 11 bytes
                 guard offset + 11 <= payload.endIndex else { break }
+                let d = Data(payload[offset..<offset+11])
+                lightMatrices.append(LightMatrix(
+                    port: d[1],
+                    pixels: Array(d[2..<11])
+                ))
                 offset += 11
 
             default:
                 // Unknown sub-message — can't continue parsing
-                return SPIKEDeviceNotification(battery: battery, motors: motors, distances: distances, colors: colors, forces: forces)
+                return SPIKEDeviceNotification(battery: battery, motors: motors, distances: distances, colors: colors, forces: forces, lightMatrices: lightMatrices)
             }
         }
 
-        return SPIKEDeviceNotification(battery: battery, motors: motors, distances: distances, colors: colors, forces: forces)
+        return SPIKEDeviceNotification(battery: battery, motors: motors, distances: distances, colors: colors, forces: forces, lightMatrices: lightMatrices)
     }
 }
 
