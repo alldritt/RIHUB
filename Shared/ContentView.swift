@@ -236,7 +236,8 @@ struct PortRowView: View {
 
             // LWP3 device — show type name when no SPIKE telemetry
             if !hasSPIKEData, let rawType = snapshot.lwp3Devices[port] {
-                LWP3DeviceRowView(rawType: rawType, portValue: snapshot.lwp3PortValues[port])
+                LWP3DeviceRowView(rawType: rawType, portValue: snapshot.lwp3PortValues[port],
+                                  port: port, hub: hub)
             }
 
             Spacer()
@@ -270,16 +271,12 @@ struct MotorRowView: View {
                 .frame(minWidth: 100, maxWidth: 160)
                 .onChange(of: sliderSpeed) { newValue in
                     let speed = Int8(clamping: Int(newValue))
-                    if speed == 0 {
-                        hub.sendLWP3(LWP3Command.motorBrake(portID: motor.port))
-                    } else {
-                        hub.sendLWP3(LWP3Command.motorStartSpeed(portID: motor.port, speed: speed))
-                    }
+                    hub.sendLWP3(LWP3Command.motorStartSpeed(portID: motor.port, speed: speed))
                 }
 
                 Button {
                     sliderSpeed = 0
-                    hub.sendLWP3(LWP3Command.motorBrake(portID: motor.port))
+                    hub.sendLWP3(LWP3Command.motorStartSpeed(portID: motor.port, speed: 0))
                 } label: {
                     Text("Stop")
                         .font(.subheadline)
@@ -388,9 +385,22 @@ struct LightMatrixRowView: View {
 struct LWP3DeviceRowView: View {
     let rawType: UInt16
     let portValue: Data?
+    let port: UInt8
+    let hub: RIHub?
+
+    @State private var sliderSpeed: Double = 0
 
     private var deviceType: LWP3IODeviceType? {
         LWP3IODeviceType(rawValue: rawType)
+    }
+
+    private var isControllable: Bool {
+        let cat = deviceType?.category
+        return cat == .motor || cat == .light
+    }
+
+    private var isMotor: Bool {
+        deviceType?.category == .motor
     }
 
     private var icon: String {
@@ -428,6 +438,29 @@ struct LWP3DeviceRowView: View {
             if let power = powerValue {
                 Text("\(valueLabel):\(power)")
                     .font(.system(.subheadline, design: .monospaced))
+            }
+
+            if isControllable, let hub = hub, hub.canControlMotors {
+                Slider(value: $sliderSpeed,
+                       in: isMotor ? -100...100 : 0...100,
+                       step: 1) {
+                    Text("Power")
+                }
+                .frame(minWidth: 100, maxWidth: 160)
+                .onChange(of: sliderSpeed) { newValue in
+                    let power = Int8(clamping: Int(newValue))
+                    hub.sendLWP3(LWP3Command.motorStartPower(portID: port, power: power))
+                }
+
+                Button {
+                    sliderSpeed = 0
+                    hub.sendLWP3(LWP3Command.motorStartPower(portID: port, power: 0))
+                } label: {
+                    Text(isMotor ? "Stop" : "Off")
+                        .font(.subheadline)
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.borderless)
             }
         }
     }
