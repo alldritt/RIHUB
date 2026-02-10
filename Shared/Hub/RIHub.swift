@@ -172,7 +172,10 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     private var spikeNotifyCharacteristic: CBCharacteristic?  // FD02-0002 (notify)
     private(set) var spikeInfo: SPIKEInfoResponse?
     private(set) var usingSPIKEProtocol = false
-    private(set) var attachedDevices: [UInt8: LWP3IODeviceType] = [:]
+    /// LWP3 attached devices: port ID → raw device type ID.
+    private(set) var attachedDevices: [UInt8: UInt16] = [:]
+    /// LWP3 port value data: port ID → latest raw value bytes.
+    private(set) var lwp3PortValues: [UInt8: Data] = [:]
 
     // SPIKE device state — updated from DeviceNotification (0x3C)
     private(set) var spikeMotors: [UInt8: SPIKEDeviceNotification.Motor] = [:]
@@ -195,7 +198,9 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
             distances: spikeDistances,
             colors: spikeColors,
             forces: spikeForces,
-            lightMatrices: spikeLightMatrices
+            lightMatrices: spikeLightMatrices,
+            lwp3Devices: attachedDevices,
+            lwp3PortValues: lwp3PortValues
         )
     }
 
@@ -205,20 +210,29 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         let colors: [UInt8: SPIKEDeviceNotification.Color]
         let forces: [UInt8: SPIKEDeviceNotification.Force]
         let lightMatrices: [UInt8: SPIKEDeviceNotification.LightMatrix]
+        /// LWP3 attached devices: port ID → raw device type ID.
+        let lwp3Devices: [UInt8: UInt16]
+        /// LWP3 port value data: port ID → latest raw value bytes.
+        let lwp3PortValues: [UInt8: Data]
 
+        /// External ports with device data (SPIKE or LWP3).
         var activePorts: [UInt8] {
-            let ports = Set(motors.keys)
+            let spikePorts = Set(motors.keys)
                 .union(distances.keys)
                 .union(colors.keys)
                 .union(forces.keys)
                 .union(lightMatrices.keys)
-            return ports.sorted()
+            // LWP3: include external ports (typically 0–5), skip hub-internal ports (≥50)
+            let lwp3Ports = Set(lwp3Devices.keys.filter { $0 < 50 })
+            return spikePorts.union(lwp3Ports).sorted()
         }
     }
 
-    /// Convert port number (0–5) to letter (A–F).
+    /// Convert port number to display name.
     static func portLetter(_ port: UInt8) -> String {
-        guard let scalar = UnicodeScalar(Int(port) + 65) else { return "?" }
+        guard port < 26, let scalar = UnicodeScalar(Int(port) + 65) else {
+            return "Port(\(port))"
+        }
         return String(Character(scalar))
     }
     private(set) var realSampleCount = 0
@@ -250,8 +264,16 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     }
     
     func connect() {
-        guard state == .disconnected || state == .disconnecting else { return }
-        
+        guard state == .disconnected || state == .disconnecting else {
+            #if DEBUG
+            print("Hub \(deviceName): connect() skipped — state is \(state.name)")
+            #endif
+            return
+        }
+
+        #if DEBUG
+        print("Hub \(deviceName): connect() initiated")
+        #endif
         connectPart2()
     }
 
@@ -267,12 +289,14 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         
     func broadcastStateChange() {
         assert(Thread.isMainThread)
-        
+
         if state != lastState {
+            #if DEBUG
+            print("Hub \(deviceName): state \(lastState.name) → \(state.name)")
+            #endif
             if state == .connected {
                 peripheral.discoverServices(nil)
             }
-            //print("broadcastStateChange: \(peripheral)")
             lastState = state
             NotificationCenter.default.post(name: Self.StateChangeNotification, object: self)
         }
@@ -280,6 +304,9 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     
     func isLost(_ now: Date) -> Bool {
         if peripheral.state == .connecting && Date().timeIntervalSince(connectDate) >= Self.ConnectInterval {
+            #if DEBUG
+            print("Hub \(deviceName): connect timeout after \(Self.ConnectInterval)s — disconnecting")
+            #endif
             disconnect()
         }
         return peripheral.state == .disconnected && lastSeen.addingTimeInterval(Self.DeviceLostInterval) < now
@@ -302,6 +329,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         spikeInfo = nil
         usingSPIKEProtocol = false
         attachedDevices.removeAll()
+        lwp3PortValues.removeAll()
         spikeMotors.removeAll()
         spikeDistances.removeAll()
         spikeColors.removeAll()
@@ -507,17 +535,31 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         #endif
 
         switch message {
-        case .hubAttachedIO(let portID, let event, let deviceType, _, _, _, _):
+        case .hubAttachedIO(let portID, let event, _, let deviceTypeRaw, _, _, _, _):
             switch event {
             case .attached, .attachedVirtual:
-                if let deviceType = deviceType {
-                    attachedDevices[portID] = deviceType
+                attachedDevices[portID] = deviceTypeRaw
+                lwp3PortValues.removeValue(forKey: portID)
+                // Subscribe to mode 0 value notifications for external ports
+                if portID < 50 {
+                    send(LWP3Command.setPortInputFormat(portID: portID, mode: 0,
+                                                        deltaInterval: 1,
+                                                        notificationEnabled: true))
                 }
             case .detached:
                 attachedDevices.removeValue(forKey: portID)
+                lwp3PortValues.removeValue(forKey: portID)
             }
             DispatchQueue.main.async {
                 NotificationCenter.default.post(name: Self.AttachedDevicesChangedNotification, object: self)
+            }
+
+        case .portValueSingle(let portID, let value):
+            dataLock.lock()
+            lwp3PortValues[portID] = value
+            dataLock.unlock()
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: Self.DeviceDataChangedNotification, object: self)
             }
 
         case .hubProperty(let property, let operation, let payload):

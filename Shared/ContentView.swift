@@ -159,6 +159,11 @@ struct ConnectedView: View {
             batteryLevel = hub.batteryLevel
         }
         .onReceive(NotificationCenter.default
+            .publisher(for: RIHub.AttachedDevicesChangedNotification, object: hub)) { _ in
+            snapshot = hub.deviceDataSnapshot()
+            batteryLevel = hub.batteryLevel
+        }
+        .onReceive(NotificationCenter.default
             .publisher(for: RIHub.BatteryChangeNotification, object: hub)) { _ in
             batteryLevel = hub.batteryLevel
         }
@@ -201,6 +206,12 @@ struct PortRowView: View {
     let port: UInt8
     let hub: RIHub?
 
+    private var hasSPIKEData: Bool {
+        snapshot.motors[port] != nil || snapshot.distances[port] != nil ||
+        snapshot.colors[port] != nil || snapshot.forces[port] != nil ||
+        snapshot.lightMatrices[port] != nil
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             Text("Port \(RIHub.portLetter(port))")
@@ -221,6 +232,11 @@ struct PortRowView: View {
             }
             if let light = snapshot.lightMatrices[port] {
                 LightMatrixRowView(light: light)
+            }
+
+            // LWP3 device — show type name when no SPIKE telemetry
+            if !hasSPIKEData, let rawType = snapshot.lwp3Devices[port] {
+                LWP3DeviceRowView(rawType: rawType, portValue: snapshot.lwp3PortValues[port])
             }
 
             Spacer()
@@ -364,6 +380,54 @@ struct LightMatrixRowView: View {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+struct LWP3DeviceRowView: View {
+    let rawType: UInt16
+    let portValue: Data?
+
+    private var deviceType: LWP3IODeviceType? {
+        LWP3IODeviceType(rawValue: rawType)
+    }
+
+    private var icon: String {
+        switch deviceType?.category {
+        case .motor:       return "gearshape.fill"
+        case .sensor:      return "sensor.fill"
+        case .light:       return "lightbulb.fill"
+        case .hubInternal: return "cpu"
+        default:           return "puzzlepiece.fill"
+        }
+    }
+
+    /// Interpret mode 0 value as a signed power/speed percentage.
+    private var powerValue: Int8? {
+        guard let data = portValue, !data.isEmpty else { return nil }
+        return Int8(bitPattern: data[data.startIndex])
+    }
+
+    private var valueLabel: String {
+        switch deviceType?.category {
+        case .motor:  return "pwr"
+        case .light:  return "pwr"
+        default:      return "val"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            Text(deviceType?.displayName ?? "Device(\(rawType))")
+                .foregroundColor(.secondary)
+                .font(.subheadline)
+            if let power = powerValue {
+                Text("\(valueLabel):\(power)")
+                    .font(.system(.subheadline, design: .monospaced))
             }
         }
     }

@@ -47,6 +47,7 @@ enum LWP3Message {
     case hubAction(action: LWP3HubActionType)
     case hubAlert(alertType: UInt8, operation: UInt8, payload: Data)
     case hubAttachedIO(portID: UInt8, event: LWP3IOEvent, deviceType: LWP3IODeviceType?,
+                       deviceTypeRaw: UInt16,
                        hwRevision: UInt32?, swRevision: UInt32?,
                        portIDA: UInt8?, portIDB: UInt8?)
     case portValueSingle(portID: UInt8, value: Data)
@@ -169,6 +170,7 @@ enum LWP3Message {
         switch event {
         case .detached:
             return .hubAttachedIO(portID: portID, event: event, deviceType: nil,
+                                  deviceTypeRaw: 0,
                                   hwRevision: nil, swRevision: nil,
                                   portIDA: nil, portIDB: nil)
 
@@ -179,6 +181,7 @@ enum LWP3Message {
             let hwRevision = payload.lwp3_uint32LE(at: 4)
             let swRevision = payload.lwp3_uint32LE(at: 8)
             return .hubAttachedIO(portID: portID, event: event, deviceType: deviceType,
+                                  deviceTypeRaw: deviceTypeRaw,
                                   hwRevision: hwRevision, swRevision: swRevision,
                                   portIDA: nil, portIDB: nil)
 
@@ -189,6 +192,7 @@ enum LWP3Message {
             let portIDA = payload[payload.startIndex + 4]
             let portIDB = payload[payload.startIndex + 5]
             return .hubAttachedIO(portID: portID, event: event, deviceType: deviceType,
+                                  deviceTypeRaw: deviceTypeRaw,
                                   hwRevision: nil, swRevision: nil,
                                   portIDA: portIDA, portIDB: portIDB)
         }
@@ -263,17 +267,16 @@ extension LWP3Message: CustomStringConvertible {
             return "HubAction(\(action))"
         case .hubAlert(let alertType, let operation, _):
             return "HubAlert(type: 0x\(String(format: "%02X", alertType)), op: 0x\(String(format: "%02X", operation)))"
-        case .hubAttachedIO(let portID, let event, let deviceType, _, _, let portIDA, let portIDB):
+        case .hubAttachedIO(let portID, let event, _, let deviceTypeRaw, _, _, let portIDA, let portIDB):
             let portName = LWP3PortID(value: portID).displayName
+            let typeName = LWP3IODeviceType(rawValue: deviceTypeRaw)?.displayName ?? "Unknown(\(deviceTypeRaw))"
             switch event {
             case .detached:
                 return "IO Detached(port \(portName))"
             case .attached:
-                let name = deviceType?.displayName ?? "Unknown(\(portID))"
-                return "IO Attached(port \(portName): \(name))"
+                return "IO Attached(port \(portName): \(typeName))"
             case .attachedVirtual:
-                let name = deviceType?.displayName ?? "Unknown"
-                return "IO VirtualAttached(port \(portName): \(name), ports \(portIDA ?? 0)+\(portIDB ?? 0))"
+                return "IO VirtualAttached(port \(portName): \(typeName), ports \(portIDA ?? 0)+\(portIDB ?? 0))"
             }
         case .portValueSingle(let portID, let value):
             return "PortValue(port \(LWP3PortID(value: portID).displayName), \(value.count) bytes)"

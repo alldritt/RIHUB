@@ -218,6 +218,9 @@ extension RIHubManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        #if DEBUG
+        print("BLE: didConnect \(peripheral.name ?? "?")")
+        #endif
         DispatchQueue.main.async {
             guard let hub = self.devices[peripheral.identifier] else { return }
 
@@ -227,6 +230,9 @@ extension RIHubManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        #if DEBUG
+        print("BLE: didFailToConnect \(peripheral.name ?? "?") error=\(error?.localizedDescription ?? "none")")
+        #endif
         DispatchQueue.main.async {
             guard let hub = self.devices[peripheral.identifier] else { return }
 
@@ -236,6 +242,9 @@ extension RIHubManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        #if DEBUG
+        print("BLE: didDisconnect \(peripheral.name ?? "?") error=\(error?.localizedDescription ?? "none")")
+        #endif
         DispatchQueue.main.async {
             guard let hub = self.devices[peripheral.identifier] else { return }
 

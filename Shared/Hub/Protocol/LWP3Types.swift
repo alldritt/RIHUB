@@ -45,6 +45,7 @@ enum LWP3IODeviceType: UInt16, CaseIterable {
     // Motors
     case poweredUpMediumMotor          = 1
     case trainMotor                    = 2
+    case poweredUpLights               = 8
     case boostInteractiveMotor         = 38
     case spikeMediumMotor              = 48
     case spikeLargeMotor               = 49
@@ -78,6 +79,7 @@ enum LWP3IODeviceType: UInt16, CaseIterable {
         switch self {
         case .poweredUpMediumMotor:          return "Powered Up Medium Motor"
         case .trainMotor:                    return "Train Motor"
+        case .poweredUpLights:               return "Powered Up Lights"
         case .boostInteractiveMotor:         return "BOOST Interactive Motor"
         case .spikeMediumMotor:              return "SPIKE Medium Motor"
         case .spikeLargeMotor:               return "SPIKE Large Motor"
@@ -112,7 +114,7 @@ enum LWP3IODeviceType: UInt16, CaseIterable {
         case .boostColorDistance, .technicColorSensor, .technicDistanceSensor,
              .technicForceSensor:
             return .sensor
-        case .hubRGBLight, .technicColorLightMatrix:
+        case .poweredUpLights, .hubRGBLight, .technicColorLightMatrix:
             return .light
         case .hubIMUGesture, .hubIMUAccelerometer, .hubIMUGyro, .hubIMUPosition,
              .hubIMUTemperature, .hubIMUOrientation, .hubBatteryVoltage,
