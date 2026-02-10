@@ -19,8 +19,9 @@ class RIHubManager: NSObject {
 
     /// Service UUIDs that identify LEGO hubs.
     static let legoServiceUUIDs: Set<CBUUID> = [
-        RIHub.LEGOWirelessProtocolHubServiceUUID,   // LWP3 (Robot Inventor, SPIKE, etc.)
-        RIHub.LEGOHubServiceUUID                     // Legacy LEGO hub service (0xFEED)
+        RIHub.LEGOWirelessProtocolHubServiceUUID,   // LWP3 (Technic Hub, City Hub, etc.)
+        RIHub.LEGOHubServiceUUID,                    // Legacy LEGO hub service (0xFEED)
+        RIHub.SPIKEPrimeServiceUUID                  // SPIKE Prime / Robot Inventor (0xFD02)
     ]
 
     static let DevicesChangedNotification = Notification.Name("RIHubManager.DevicesChangedNotification")

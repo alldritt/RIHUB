@@ -27,6 +27,8 @@
 		CC000002267A000000000002 /* LWP3Types.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC000001267A000000000011 /* LWP3Types.swift */; };
 		CC000002267A000000000003 /* LWP3Message.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC000001267A000000000012 /* LWP3Message.swift */; };
 		CC000002267A000000000004 /* LWP3Command.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC000001267A000000000013 /* LWP3Command.swift */; };
+		CC000004267A000000000001 /* SPIKEProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC000004267A000000000011 /* SPIKEProtocol.swift */; };
+		CC000004267A000000000002 /* SPIKEProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC000004267A000000000011 /* SPIKEProtocol.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -45,6 +47,7 @@
 		CC000001267A000000000013 /* LWP3Command.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LWP3Command.swift; sourceTree = "<group>"; };
 		CC000002267A000000000010 /* LWP3ProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LWP3ProtocolTests.swift; sourceTree = "<group>"; };
 		CC000002267A00000000000D /* LWP3ProtocolTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LWP3ProtocolTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC000004267A000000000011 /* SPIKEProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPIKEProtocol.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -137,6 +140,7 @@
 				CC000001267A000000000011 /* LWP3Types.swift */,
 				CC000001267A000000000012 /* LWP3Message.swift */,
 				CC000001267A000000000013 /* LWP3Command.swift */,
+				CC000004267A000000000011 /* SPIKEProtocol.swift */,
 			);
 			path = Protocol;
 			sourceTree = "<group>";
@@ -273,6 +277,7 @@
 				CC000001267A000000000001 /* LWP3Types.swift in Sources */,
 				CC000001267A000000000003 /* LWP3Message.swift in Sources */,
 				CC000001267A000000000005 /* LWP3Command.swift in Sources */,
+				CC000004267A000000000001 /* SPIKEProtocol.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -287,6 +292,7 @@
 				CC000001267A000000000002 /* LWP3Types.swift in Sources */,
 				CC000001267A000000000004 /* LWP3Message.swift in Sources */,
 				CC000001267A000000000006 /* LWP3Command.swift in Sources */,
+				CC000004267A000000000002 /* SPIKEProtocol.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
