@@ -140,10 +140,6 @@ class RIHubManager: NSObject {
             DispatchQueue.main.async {
                 guard self.devices[peripheral.identifier] == nil else { return }
 
-                #if DEBUG
-                print("Found already-connected LEGO hub: \(peripheral.name ?? "unknown") (\(peripheral.identifier))")
-                #endif
-
                 self.devices[peripheral.identifier] = RIHub(centralManager: self.centralManager,
                                                             peripheral: peripheral,
                                                             advertisementData: [:],
@@ -158,22 +154,11 @@ extension RIHubManager: CBCentralManagerDelegate {
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
-        case .unknown:
-            print("central.state is .unknown")
-
-        case .resetting:
-            print("central.state is .resetting")
-
-        case .unsupported:
-            print("central.state is .unsupported")
-
-        case .unauthorized:
-            print("central.state is .unauthorized")
+        case .unknown, .resetting, .unsupported, .unauthorized:
+            break
 
         case .poweredOff:
-            print("central.state is .poweredOff")
             if isRunning {
-                print("  - no longer listening for devices")
                 centralManager.stopScan()
                 DispatchQueue.main.async {
                     self.timer?.invalidate()
@@ -186,10 +171,7 @@ extension RIHubManager: CBCentralManagerDelegate {
             }
 
         case .poweredOn:
-            print("central.state is .poweredOn")
             if isRunning {
-                print("  - listening for LEGO hubs...")
-
                 // Pick up hubs already connected at the system level
                 checkForConnectedHubs()
 
@@ -227,11 +209,6 @@ extension RIHubManager: CBCentralManagerDelegate {
         // Not yet tracked — check if it's a LEGO hub
         guard Self.isLEGOHub(peripheral: peripheral, advertisementData: advertisementData) else { return }
 
-        #if DEBUG
-        let name = peripheral.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "unknown"
-        print("Discovered LEGO hub: \(name) (\(peripheral.identifier)), ad: \(advertisementData)")
-        #endif
-
         DispatchQueue.main.async {
             self.devices[peripheral.identifier] = RIHub(centralManager: self.centralManager,
                                                         peripheral: peripheral,
@@ -241,10 +218,6 @@ extension RIHubManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        #if DEBUG
-        print("didConnect: \(peripheral)")
-        #endif
-
         DispatchQueue.main.async {
             guard let hub = self.devices[peripheral.identifier] else { return }
 
@@ -254,10 +227,6 @@ extension RIHubManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        #if DEBUG
-        print("didFailToConnect: \(peripheral), error: \(String(describing: error))")
-        #endif
-
         DispatchQueue.main.async {
             guard let hub = self.devices[peripheral.identifier] else { return }
 
@@ -267,10 +236,6 @@ extension RIHubManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        #if DEBUG
-        print("didDisconnectPeripheral: \(peripheral), error: \(String(describing: error))")
-        #endif
-
         DispatchQueue.main.async {
             guard let hub = self.devices[peripheral.identifier] else { return }
 

@@ -193,7 +193,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         self.lastSeen = Date()
         self.rssi = rssi
         
-        print("advertisementData: \(advertisementData)")
+        //print("advertisementData: \(advertisementData)")
     }
     
     deinit {
