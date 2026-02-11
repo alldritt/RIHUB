@@ -8,6 +8,7 @@
 
 #if os(iOS)
 import UIKit
+import ExternalAccessory
 #endif
 import CoreBluetooth
 
@@ -23,6 +24,9 @@ class RIHubManager: NSObject {
         RIHub.LEGOHubServiceUUID,                    // Legacy LEGO hub service (0xFEED)
         RIHub.SPIKEPrimeServiceUUID                  // SPIKE Prime / Robot Inventor (0xFD02)
     ]
+
+    /// EA protocol string for LEGO hubs.
+    static let legoEAProtocol = "com.lego.les"
 
     static let DevicesChangedNotification = Notification.Name("RIHubManager.DevicesChangedNotification")
     static let BluetoothStateChangedNotification = Notification.Name("RIHubManager.BluetoothStateChangedNotification")
@@ -50,6 +54,9 @@ class RIHubManager: NSObject {
     private let queue = DispatchQueue(label: "LEGO")
     private var centralManager: CBCentralManager!
     private var timer: Timer?
+    /// BLE peripheral UUIDs that connected but had no usable protocol (FD02/LWP3).
+    /// Suppresses re-adding them from BLE scan — they should use EA instead.
+    private var bleNoProtocolUUIDs = Set<UUID>()
 
     static let shared = RIHubManager()
 
@@ -75,6 +82,10 @@ class RIHubManager: NSObject {
         else {
             centralManagerDidUpdateState(centralManager)
         }
+
+        #if os(iOS)
+        startEAMonitoring()
+        #endif
     }
 
     func stop() {
@@ -90,6 +101,10 @@ class RIHubManager: NSObject {
         timer?.invalidate()
         timer = nil
         centralManager.stopScan()
+
+        #if os(iOS)
+        stopEAMonitoring()
+        #endif
     }
 
     private func timerFired(_ timer: Timer) {
@@ -147,6 +162,154 @@ class RIHubManager: NSObject {
             }
         }
     }
+
+    // MARK: - ExternalAccessory Discovery (iOS only)
+
+    #if os(iOS)
+
+    private func startEAMonitoring() {
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(eaAccessoryDidConnect(_:)),
+                                               name: .EAAccessoryDidConnect,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(eaAccessoryDidDisconnect(_:)),
+                                               name: .EAAccessoryDidDisconnect,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(bleHubNoUsableProtocol(_:)),
+                                               name: RIHub.NoUsableProtocolNotification,
+                                               object: nil)
+
+        EAAccessoryManager.shared().registerForLocalNotifications()
+
+        // Check for already-connected EA accessories
+        checkForEAAccessories()
+    }
+
+    private func stopEAMonitoring() {
+        NotificationCenter.default.removeObserver(self, name: .EAAccessoryDidConnect, object: nil)
+        NotificationCenter.default.removeObserver(self, name: .EAAccessoryDidDisconnect, object: nil)
+        NotificationCenter.default.removeObserver(self, name: RIHub.NoUsableProtocolNotification, object: nil)
+        EAAccessoryManager.shared().unregisterForLocalNotifications()
+    }
+
+    private func checkForEAAccessories() {
+        let accessories = EAAccessoryManager.shared().connectedAccessories
+        #if DEBUG
+        print("EA: Checking \(accessories.count) connected accessories")
+        for acc in accessories {
+            print("EA:   \(acc.name) protocols=\(acc.protocolStrings) connected=\(acc.isConnected) connectionID=\(acc.connectionID)")
+        }
+        #endif
+        for accessory in accessories {
+            addEAAccessoryIfLEGO(accessory)
+        }
+    }
+
+    private func addEAAccessoryIfLEGO(_ accessory: EAAccessory) {
+        guard accessory.protocolStrings.contains(Self.legoEAProtocol) else { return }
+
+        let hub = RIHub(accessory: accessory, protocolString: Self.legoEAProtocol)
+        let hubID = hub.identifier
+
+        DispatchQueue.main.async {
+            guard self.devices[hubID] == nil else { return }
+            self.devices[hubID] = hub
+            #if DEBUG
+            print("EA: Added hub \(accessory.name) (connectionID=\(accessory.connectionID))")
+            #endif
+        }
+    }
+
+    @objc private func eaAccessoryDidConnect(_ notification: Notification) {
+        guard let accessory = notification.userInfo?[EAAccessoryKey] as? EAAccessory else { return }
+        addEAAccessoryIfLEGO(accessory)
+    }
+
+    /// A BLE hub connected but found no usable protocol (FD02 or LWP3).
+    /// Disconnect BLE, wait for Bluetooth Classic to re-establish, then check EA.
+    /// If EA still has nothing, show the system accessory picker.
+    @objc private func bleHubNoUsableProtocol(_ notification: Notification) {
+        guard let hub = notification.object as? RIHub, hub.transport == .ble else { return }
+
+        #if DEBUG
+        print("EA: BLE hub \(hub.deviceName) has no usable protocol — disconnecting BLE, will check EA")
+        #endif
+
+        // Remember this peripheral so BLE scan doesn't re-add it
+        bleNoProtocolUUIDs.insert(hub.identifier)
+
+        // Disconnect the useless BLE connection and remove from device list
+        hub.disconnect()
+        DispatchQueue.main.async {
+            self.devices.removeValue(forKey: hub.identifier)
+        }
+
+        // After BLE disconnects, the hub may re-establish its Bluetooth Classic
+        // connection after a brief delay. Try EA a few times before showing the picker.
+        self.retryEACheck(attemptsRemaining: 3, interval: 1.5)
+    }
+
+    /// Retry EA accessory check with delay. If all retries exhausted with no EA hub found,
+    /// show the system Bluetooth accessory picker to initiate Classic pairing.
+    private func retryEACheck(attemptsRemaining: Int, interval: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
+            guard let self = self else { return }
+
+            self.checkForEAAccessories()
+
+            // Check if we now have an EA hub
+            let hasEAHub = self.devices.values.contains { $0.transport == .externalAccessory }
+            if hasEAHub {
+                #if DEBUG
+                print("EA: Found EA hub after BLE fallback")
+                #endif
+                return
+            }
+
+            if attemptsRemaining > 1 {
+                #if DEBUG
+                print("EA: No EA hub yet, retrying... (\(attemptsRemaining - 1) attempts left)")
+                #endif
+                self.retryEACheck(attemptsRemaining: attemptsRemaining - 1, interval: interval)
+            } else {
+                // All retries exhausted — show the system accessory picker
+                #if DEBUG
+                print("EA: No EA hub found after retries — showing accessory picker")
+                #endif
+                EAAccessoryManager.shared().showBluetoothAccessoryPicker(withNameFilter: nil) { error in
+                    if let error = error as NSError?, error.code != EABluetoothAccessoryPickerError.alreadyConnected.rawValue {
+                        #if DEBUG
+                        print("EA: Picker error: \(error.localizedDescription)")
+                        #endif
+                    }
+                    // After picker completes, eaAccessoryDidConnect will fire if user paired a device
+                }
+            }
+        }
+    }
+
+    @objc private func eaAccessoryDidDisconnect(_ notification: Notification) {
+        guard let accessory = notification.userInfo?[EAAccessoryKey] as? EAAccessory else { return }
+        guard accessory.protocolStrings.contains(Self.legoEAProtocol) else { return }
+
+        // Find and remove the hub for this accessory
+        DispatchQueue.main.async {
+            let toRemove = self.devices.filter { (_, hub) in
+                hub.eaAccessory?.connectionID == accessory.connectionID
+            }
+            for (uuid, hub) in toRemove {
+                hub.disconnect()
+                self.devices.removeValue(forKey: uuid)
+                #if DEBUG
+                print("EA: Removed hub \(accessory.name) (connectionID=\(accessory.connectionID))")
+                #endif
+            }
+        }
+    }
+
+    #endif  // os(iOS)
 }
 
 
@@ -163,10 +326,17 @@ extension RIHubManager: CBCentralManagerDelegate {
                 DispatchQueue.main.async {
                     self.timer?.invalidate()
                     self.timer = nil
-                    self.hubs.forEach { (hub) in
+                    // Only disconnect BLE hubs; EA hubs are independent of CoreBluetooth state
+                    for hub in self.hubs where hub.transport == .ble {
                         hub.disconnect()
                     }
-                    self.devices.removeAll()
+                    self.devices = self.devices.filter { (_, hub) in
+                        #if os(iOS)
+                        return hub.transport == .externalAccessory
+                        #else
+                        return false
+                        #endif
+                    }
                 }
             }
 
@@ -208,6 +378,12 @@ extension RIHubManager: CBCentralManagerDelegate {
 
         // Not yet tracked — check if it's a LEGO hub
         guard Self.isLEGOHub(peripheral: peripheral, advertisementData: advertisementData) else { return }
+
+        #if os(iOS)
+        // Skip peripherals that previously connected but had no usable BLE protocol
+        // (these hubs need ExternalAccessory instead)
+        if bleNoProtocolUUIDs.contains(peripheral.identifier) { return }
+        #endif
 
         DispatchQueue.main.async {
             self.devices[peripheral.identifier] = RIHub(centralManager: self.centralManager,

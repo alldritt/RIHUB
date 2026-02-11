@@ -6,6 +6,9 @@
 //
 
 import SwiftUI
+#if os(iOS)
+import ExternalAccessory
+#endif
 
 extension View {
     var titleFont: Font {
@@ -542,10 +545,24 @@ struct HubView: View {
                 }
             }
             else {
-                Text("Please turn on your Robot Inventor hub.")
-                    .font(titleFont)
-                    .multilineTextAlignment(.center)
-                    .padding()
+                VStack(spacing: 16) {
+                    Text("Please turn on your Robot Inventor hub.")
+                        .font(titleFont)
+                        .multilineTextAlignment(.center)
+                        .padding()
+
+                    #if os(iOS)
+                    FilledButton(title: "Pair LEGO Hub") {
+                        EAAccessoryManager.shared().showBluetoothAccessoryPicker(withNameFilter: nil) { error in
+                            if let error = error {
+                                #if DEBUG
+                                print("EA picker error: \(error.localizedDescription)")
+                                #endif
+                            }
+                        }
+                    }
+                    #endif
+                }
             }
         }
         .onReceive(devicesPublisher) { (output) in

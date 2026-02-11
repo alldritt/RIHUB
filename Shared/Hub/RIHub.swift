@@ -13,6 +13,7 @@ typealias RIColor = NSColor
 typealias RIImage = NSImage
 #else
 import UIKit
+import ExternalAccessory
 
 typealias RIColor = UIColor
 typealias RIImage = UIImage
@@ -54,37 +55,46 @@ extension Date {
 
 
 class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
-   
+
+    // MARK: - Transport
+
+    enum Transport {
+        case ble
+        #if os(iOS)
+        case externalAccessory
+        #endif
+    }
+
     enum State {
         case connected, connecting, disconnected, disconnecting
-        
+
         var name: String {
             switch self {
             case .disconnected:
                 return "Disconnected"
-                
+
             case .disconnecting:
                 return "Disconnecting"
-                
+
             case .connected:
                 return "Connected"
-                
+
             case .connecting:
                 return "Connecting"
             }
         }
-        
+
         var color: RIColor {
             switch self {
             case .disconnected:
                 return .gray
-                
+
             case .disconnecting:
                 return .orange
-                
+
             case .connected:
                 return .green
-                
+
             case .connecting:
                 return .orange
             }
@@ -98,6 +108,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     static let BatteryChangeNotification = Notification.Name("RIHub.batteryChanged")
     static let AttachedDevicesChangedNotification = Notification.Name("RIHub.attachedDevicesChanged")
     static let DeviceDataChangedNotification = Notification.Name("RIHub.deviceDataChanged")
+    static let NoUsableProtocolNotification = Notification.Name("RIHub.noUsableProtocol")
 
     static let LEGOWirelessProtocolHubServiceUUID = CBUUID(string: LEGOWirelessProtocolHubServiceUUIDString)
     static let LEGOWirelessProtocolHubCharacteristicUUID = CBUUID(string: LEGOWirelessProtocolHubCharacteristicUUIDString)
@@ -116,9 +127,25 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     static let ConnectInterval = TimeInterval(10)
     static let RSSIReadInterval = TimeInterval(5)
 
-    let centralManager: CBCentralManager
-    let peripheral: CBPeripheral
+    let transport: Transport
+
+    // BLE properties (nil when using EA transport)
+    private let centralManager: CBCentralManager?
+    private let peripheral: CBPeripheral?
     let advertisementData: [String: Any]
+
+    // EA properties (iOS only)
+    #if os(iOS)
+    private(set) var eaAccessory: EAAccessory?
+    private var eaSession: EASession?
+    private var eaProtocolString: String?
+    private var eaReadBuffer = ""
+    private var eaWriteBuffer = Data()
+    /// Dedicated thread for EA RunLoop scheduling.
+    private var eaThread: Thread?
+    private var eaRunLoop: RunLoop?
+    #endif
+
     var lastSeen: Date
     var rssi: Int {
         didSet {
@@ -129,27 +156,29 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
             }
         }
     }
-    
-    var state: State {
-        switch peripheral.state {
-        case .connected:
-            return .connected
-            
-        case .connecting:
-            return .connecting
-            
-        case .disconnected:
-            return .disconnected
-            
-        case .disconnecting:
-            return .disconnecting
-            
-        @unknown default:
-            fatalError()
+
+    /// Stored state — for BLE, updated from peripheral.state via broadcastStateChange().
+    /// For EA, set directly by connect/disconnect methods.
+    private(set) var state: State = .disconnected {
+        didSet {
+            if state != oldValue {
+                #if DEBUG
+                print("Hub \(deviceName): state \(oldValue.name) → \(state.name)")
+                #endif
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: Self.StateChangeNotification, object: self)
+                }
+            }
         }
     }
+
     var deviceName: String {
-        return peripheral.name ?? "unknown"
+        #if os(iOS)
+        if transport == .externalAccessory {
+            return eaAccessory?.name ?? "SPIKE Hub (EA)"
+        }
+        #endif
+        return peripheral?.name ?? "unknown"
     }
     var image: RIImage? {
         return nil
@@ -157,8 +186,30 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     var largeImage: RIImage? {
         return nil
     }
+    private var _eaIdentifier: UUID?
     var identifier: UUID {
-        return peripheral.identifier
+        #if os(iOS)
+        if transport == .externalAccessory {
+            if let cached = _eaIdentifier { return cached }
+            // Derive a stable UUID from the EA accessory's connection ID
+            if let accessory = eaAccessory {
+                let idString = "com.lego.ea.\(accessory.connectionID)"
+                let bytes = Array(idString.utf8)
+                var digest = [UInt8](repeating: 0, count: 16)
+                for i in 0..<bytes.count {
+                    digest[i % 16] ^= bytes[i]
+                }
+                let uuid = UUID(uuid: (digest[0], digest[1], digest[2], digest[3],
+                                       digest[4], digest[5], digest[6], digest[7],
+                                       digest[8], digest[9], digest[10], digest[11],
+                                       digest[12], digest[13], digest[14], digest[15]))
+                _eaIdentifier = uuid
+                return uuid
+            }
+            return UUID()
+        }
+        #endif
+        return peripheral?.identifier ?? UUID()
     }
 
     private var lastBatteryChange = Date.distantPast
@@ -167,22 +218,24 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     private var started: Date?
     private var connectDate = Date.distantPast
     private var rssiTimer: Timer?
+    private var bleServicesProcessed = 0
     private var lwpCharacteristic: CBCharacteristic?
     private var spikeWriteCharacteristic: CBCharacteristic?   // FD02-0001 (writeNoResp)
     private var spikeNotifyCharacteristic: CBCharacteristic?  // FD02-0002 (notify)
     private(set) var spikeInfo: SPIKEInfoResponse?
     private(set) var usingSPIKEProtocol = false
-    /// LWP3 attached devices: port ID → raw device type ID.
-    private(set) var attachedDevices: [UInt8: UInt16] = [:]
+    /// Attached devices: port ID → raw device type ID. (LWP3 or JSON telemetry)
+    var attachedDevices: [UInt8: UInt16] = [:]
     /// LWP3 port value data: port ID → latest raw value bytes.
     private(set) var lwp3PortValues: [UInt8: Data] = [:]
 
-    // SPIKE device state — updated from DeviceNotification (0x3C)
-    private(set) var spikeMotors: [UInt8: SPIKEDeviceNotification.Motor] = [:]
-    private(set) var spikeDistances: [UInt8: SPIKEDeviceNotification.Distance] = [:]
-    private(set) var spikeColors: [UInt8: SPIKEDeviceNotification.Color] = [:]
-    private(set) var spikeForces: [UInt8: SPIKEDeviceNotification.Force] = [:]
-    private(set) var spikeLightMatrices: [UInt8: SPIKEDeviceNotification.LightMatrix] = [:]
+    // SPIKE device state — updated from DeviceNotification (0x3C) or JSON telemetry.
+    // Internal access needed by SPIKEJSONParser; guarded by dataLock.
+    var spikeMotors: [UInt8: SPIKEDeviceNotification.Motor] = [:]
+    var spikeDistances: [UInt8: SPIKEDeviceNotification.Distance] = [:]
+    var spikeColors: [UInt8: SPIKEDeviceNotification.Color] = [:]
+    var spikeForces: [UInt8: SPIKEDeviceNotification.Force] = [:]
+    var spikeLightMatrices: [UInt8: SPIKEDeviceNotification.LightMatrix] = [:]
 
     /// Battery level as integer percentage (0–100), or nil if not yet received.
     var batteryLevel: Int? {
@@ -236,7 +289,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         return String(Character(scalar))
     }
     private(set) var realSampleCount = 0
-    private(set) var batteryv = Double(0) {
+    var batteryv = Double(0) {
         didSet {
             let now = Date()
             if batteryv != oldValue && (oldValue == 0 || now.timeIntervalSince(lastBatteryChange) >= Self.BatteryChangeInterval) {
@@ -249,20 +302,38 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     }
     private(set) var dataLock = NSLock()
 
+    // MARK: - BLE Init
+
     init(centralManager: CBCentralManager, peripheral: CBPeripheral, advertisementData: [String : Any], rssi: Int) {
+        self.transport = .ble
         self.centralManager = centralManager
         self.peripheral = peripheral
         self.advertisementData = advertisementData
         self.lastSeen = Date()
         self.rssi = rssi
-        
+
         //print("advertisementData: \(advertisementData)")
     }
-    
+
+    // MARK: - ExternalAccessory Init (iOS only)
+
+    #if os(iOS)
+    init(accessory: EAAccessory, protocolString: String) {
+        self.transport = .externalAccessory
+        self.centralManager = nil
+        self.peripheral = nil
+        self.advertisementData = [:]
+        self.lastSeen = Date()
+        self.rssi = 0
+        self.eaAccessory = accessory
+        self.eaProtocolString = protocolString
+    }
+    #endif
+
     deinit {
         disconnect()
     }
-    
+
     func connect() {
         guard state == .disconnected || state == .disconnecting else {
             #if DEBUG
@@ -274,35 +345,85 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         #if DEBUG
         print("Hub \(deviceName): connect() initiated")
         #endif
-        connectPart2()
+
+        #if os(iOS)
+        if transport == .externalAccessory {
+            connectEA()
+            return
+        }
+        #endif
+        connectBLE()
     }
 
     func disconnect() {
+        #if os(iOS)
+        if transport == .externalAccessory {
+            disconnectEA()
+            return
+        }
+        #endif
+        disconnectBLE()
+    }
+
+    // MARK: - BLE Connect/Disconnect
+
+    private func disconnectBLE() {
         rssiTimer?.invalidate()
         rssiTimer = nil
         guard state == .connected || state == .connecting else { return }
-        
-        centralManager.cancelPeripheralConnection(peripheral)
+
+        if let peripheral = peripheral, let centralManager = centralManager {
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
         lastSeen = Date()
-        broadcastStateChange()
+        syncStateFromPeripheral()
     }
-        
+
+    /// Read current BLE peripheral state and update the stored state.
+    func syncStateFromPeripheral() {
+        guard transport == .ble, let peripheral = peripheral else { return }
+        let newState: State
+        switch peripheral.state {
+        case .connected:     newState = .connected
+        case .connecting:    newState = .connecting
+        case .disconnected:  newState = .disconnected
+        case .disconnecting: newState = .disconnecting
+        @unknown default:    newState = .disconnected
+        }
+        state = newState
+    }
+
     func broadcastStateChange() {
         assert(Thread.isMainThread)
 
-        if state != lastState {
-            #if DEBUG
-            print("Hub \(deviceName): state \(lastState.name) → \(state.name)")
-            #endif
-            if state == .connected {
+        guard transport == .ble, let peripheral = peripheral else { return }
+
+        let bleState: State
+        switch peripheral.state {
+        case .connected:     bleState = .connected
+        case .connecting:    bleState = .connecting
+        case .disconnected:  bleState = .disconnected
+        case .disconnecting: bleState = .disconnecting
+        @unknown default:    bleState = .disconnected
+        }
+
+        if bleState != lastState {
+            if bleState == .connected {
                 peripheral.discoverServices(nil)
             }
-            lastState = state
-            NotificationCenter.default.post(name: Self.StateChangeNotification, object: self)
+            lastState = bleState
+            state = bleState  // triggers didSet → notification
         }
     }
-    
+
     func isLost(_ now: Date) -> Bool {
+        #if os(iOS)
+        if transport == .externalAccessory {
+            // EA hubs are either connected or removed — never "lost" from scanning
+            return false
+        }
+        #endif
+        guard let peripheral = peripheral else { return true }
         if peripheral.state == .connecting && Date().timeIntervalSince(connectDate) >= Self.ConnectInterval {
             #if DEBUG
             print("Hub \(deviceName): connect timeout after \(Self.ConnectInterval)s — disconnecting")
@@ -311,7 +432,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         }
         return peripheral.state == .disconnected && lastSeen.addingTimeInterval(Self.DeviceLostInterval) < now
     }
-    
+
     private func resetConnection() {
         self.dataLock.lock()
         defer {
@@ -323,6 +444,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         realSampleCount = 0
         batteryv = 0
         lastBatteryChange = Date.distantPast
+        bleServicesProcessed = 0
         lwpCharacteristic = nil
         spikeWriteCharacteristic = nil
         spikeNotifyCharacteristic = nil
@@ -337,21 +459,33 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         spikeLightMatrices.removeAll()
         resetDevice()
     }
-    
+
     func resetDevice() { // subclass responsibility
     }
 
     // MARK: - LWP3 Protocol
 
-    /// Whether LWP3 motor commands are available (hub exposes 1623 service).
+    /// Whether motor commands are available.
     var canControlMotors: Bool {
-        lwpCharacteristic != nil
+        #if os(iOS)
+        if transport == .externalAccessory {
+            return state == .connected
+        }
+        #endif
+        return lwpCharacteristic != nil
     }
 
     /// Send an LWP3 command directly to the LWP3 characteristic (for motor control).
-    /// Bypasses SPIKE routing — use this for motor commands when both protocols are active.
+    /// For EA transport, translates to JSON scratch commands.
     func sendLWP3(_ command: Data) {
-        guard let characteristic = lwpCharacteristic else {
+        #if os(iOS)
+        if transport == .externalAccessory {
+            // Translate LWP3 motor commands to JSON scratch commands
+            translateLWP3ToEA(command)
+            return
+        }
+        #endif
+        guard let characteristic = lwpCharacteristic, let peripheral = peripheral else {
             #if DEBUG
             print("LWP3: Cannot send — no LWP characteristic (motor control unavailable)")
             #endif
@@ -361,11 +495,16 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     }
 
     func send(_ command: Data) {
+        #if os(iOS)
+        if transport == .externalAccessory {
+            return  // EA uses JSON protocol, not binary commands
+        }
+        #endif
         if usingSPIKEProtocol {
             sendSPIKE(command)
             return
         }
-        guard let characteristic = lwpCharacteristic else {
+        guard let characteristic = lwpCharacteristic, let peripheral = peripheral else {
             #if DEBUG
             print("LWP3: Cannot send — no LWP characteristic")
             #endif
@@ -378,7 +517,7 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
 
     /// Send a raw SPIKE Prime message (will be COBS-encoded and framed).
     func sendSPIKE(_ message: Data) {
-        guard let writeChar = spikeWriteCharacteristic else {
+        guard let writeChar = spikeWriteCharacteristic, let peripheral = peripheral else {
             #if DEBUG
             print("SPIKE: Cannot send — no write characteristic")
             #endif
@@ -573,13 +712,14 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
             break
         }
     }
-    
-    private func connectPart2() {
+
+    private func connectBLE() {
+        guard let peripheral = peripheral, let centralManager = centralManager else { return }
         rssiTimer = Timer.scheduledTimer(withTimeInterval: Self.RSSIReadInterval,
                                          repeats: true,
                                          block: { [weak self] (_) in
             if self?.state == .connected {
-                self?.peripheral.readRSSI()
+                self?.peripheral?.readRSSI()
             }
         })
         peripheral.delegate = self
@@ -588,24 +728,24 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         centralManager.connect(peripheral, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey:1])
         broadcastStateChange()
     }
-    
+
     private func noteThisHub() {
         //  Update the list of device UUIDs for ehich we've added a type
         if let knownDeviceUUIDs = UserDefaults.standard.object(forKey: "EEGHeadband.uuids") as? [String] {
             if !knownDeviceUUIDs.contains(identifier.uuidString) {
                 var deviceUUIDs = Array<String>(knownDeviceUUIDs)
-                
+
                 deviceUUIDs.append(identifier.uuidString)
                 UserDefaults.standard.set(deviceUUIDs, forKey: "EEGHeadband.uuids")
             }
         }
         else {
             let deviceUUIDs = [identifier.uuidString]
-            
+
             UserDefaults.standard.set(deviceUUIDs, forKey: "EEGHeadband.uuids")
         }
     }
-    
+
     // MARK: - BLE Property Helpers
 
     private static func propertyNames(_ properties: CBCharacteristicProperties) -> String {
@@ -685,10 +825,23 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
             }
         }
 
+        bleServicesProcessed += 1
+
         #if DEBUG
         let services = peripheral.services?.map { $0.uuid.uuidString } ?? []
-        print("Services discovered: \(services) | SPIKE=\(usingSPIKEProtocol) LWP3=\(lwpCharacteristic != nil) motorControl=\(canControlMotors)")
+        print("Services discovered: \(services) | SPIKE=\(usingSPIKEProtocol) LWP3=\(lwpCharacteristic != nil) motorControl=\(canControlMotors) [\(bleServicesProcessed)/\(peripheral.services?.count ?? 0)]")
         #endif
+
+        // Check if all services have been processed
+        if bleServicesProcessed >= (peripheral.services?.count ?? 0),
+           !usingSPIKEProtocol, lwpCharacteristic == nil {
+            #if DEBUG
+            print("BLE: No usable protocol found after discovering all services")
+            #endif
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: Self.NoUsableProtocolNotification, object: self)
+            }
+        }
     }
 
     private func setupLWPCharacteristic(_ characteristic: CBCharacteristic) {
@@ -736,12 +889,284 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
             handleLWP3Message(data)
         }
     }
-    
+
     //  Mark: - Equitable
 
     static func == (lhs: RIHub, rhs: RIHub) -> Bool {
         return lhs.identifier == rhs.identifier
     }
+
+    // MARK: - ExternalAccessory Session Management (iOS only)
+
+    #if os(iOS)
+
+    private func connectEA() {
+        guard transport == .externalAccessory,
+              let accessory = eaAccessory,
+              let proto = eaProtocolString else { return }
+
+        resetConnection()
+        state = .connecting
+
+        // Create EA session
+        guard let session = EASession(accessory: accessory, forProtocol: proto) else {
+            #if DEBUG
+            print("EA: Failed to create session for \(accessory.name) protocol \(proto)")
+            #endif
+            state = .disconnected
+            return
+        }
+
+        eaSession = session
+
+        // Start a dedicated thread for stream scheduling
+        let thread = Thread { [weak self] in
+            guard let self = self, let session = self.eaSession else { return }
+
+            let runLoop = RunLoop.current
+            self.eaRunLoop = runLoop
+
+            session.inputStream?.delegate = self
+            session.inputStream?.schedule(in: runLoop, forMode: .default)
+            session.inputStream?.open()
+
+            session.outputStream?.delegate = self
+            session.outputStream?.schedule(in: runLoop, forMode: .default)
+            session.outputStream?.open()
+
+            // Keep the RunLoop alive
+            while !Thread.current.isCancelled {
+                runLoop.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
+            }
+        }
+        thread.name = "EA-\(accessory.name)"
+        thread.qualityOfService = .userInitiated
+        eaThread = thread
+        thread.start()
+
+        state = .connected
+
+        #if DEBUG
+        print("EA: Connected to \(accessory.name) via \(proto)")
+        #endif
+    }
+
+    private func disconnectEA() {
+        guard transport == .externalAccessory else { return }
+
+        eaThread?.cancel()
+        eaThread = nil
+        eaRunLoop = nil
+
+        if let session = eaSession {
+            session.inputStream?.close()
+            session.inputStream?.remove(from: .current, forMode: .default)
+            session.inputStream?.delegate = nil
+
+            session.outputStream?.close()
+            session.outputStream?.remove(from: .current, forMode: .default)
+            session.outputStream?.delegate = nil
+        }
+        eaSession = nil
+        eaReadBuffer = ""
+        eaWriteBuffer = Data()
+
+        state = .disconnected
+
+        #if DEBUG
+        print("EA: Disconnected from \(eaAccessory?.name ?? "?")")
+        #endif
+    }
+
+    /// Send a JSON command string over the EA session.
+    /// Safe to call from any thread — dispatches the write to the EA stream thread.
+    func sendEACommand(_ jsonString: String) {
+        guard transport == .externalAccessory,
+              let data = (jsonString + "\r").data(using: .utf8),
+              let thread = eaThread, !thread.isCancelled else { return }
+
+        #if DEBUG
+        print("EA TX: \(jsonString)")
+        #endif
+
+        // Dispatch to the EA thread where streams are scheduled
+        perform(#selector(eaEnqueueAndFlush(_:)), on: thread, with: data, waitUntilDone: false)
+    }
+
+    @objc private func eaEnqueueAndFlush(_ data: Data) {
+        eaWriteBuffer.append(data)
+        flushEAWriteBuffer()
+    }
+
+    private func flushEAWriteBuffer() {
+        guard let outputStream = eaSession?.outputStream,
+              outputStream.hasSpaceAvailable,
+              !eaWriteBuffer.isEmpty else { return }
+
+        let bytesWritten = eaWriteBuffer.withUnsafeBytes { ptr -> Int in
+            guard let baseAddress = ptr.baseAddress else { return 0 }
+            return outputStream.write(baseAddress.assumingMemoryBound(to: UInt8.self),
+                                      maxLength: eaWriteBuffer.count)
+        }
+
+        if bytesWritten > 0 {
+            eaWriteBuffer.removeFirst(bytesWritten)
+        }
+    }
+
+    private func readEAData() {
+        guard let inputStream = eaSession?.inputStream else { return }
+
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while inputStream.hasBytesAvailable {
+            let bytesRead = inputStream.read(&buffer, maxLength: buffer.count)
+            guard bytesRead > 0 else { break }
+
+            if let chunk = String(bytes: buffer[0..<bytesRead], encoding: .utf8) {
+                eaReadBuffer += chunk
+                processEALines()
+            }
+        }
+    }
+
+    /// Split accumulated buffer on newlines and parse each complete JSON line.
+    private func processEALines() {
+        while let newlineRange = eaReadBuffer.range(of: "\r") ?? eaReadBuffer.range(of: "\n") {
+            let line = String(eaReadBuffer[eaReadBuffer.startIndex..<newlineRange.lowerBound])
+            eaReadBuffer = String(eaReadBuffer[newlineRange.upperBound...])
+
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            handleEAJSONLine(trimmed)
+        }
+    }
+
+    /// Parse a single JSON line from the EA stream and update device state.
+    private func handleEAJSONLine(_ line: String) {
+        guard let data = line.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let m = json["m"] as? Int,
+              let p = json["p"] as? [Any] else {
+            #if DEBUG
+            print("EA RX: unparseable line: \(line.prefix(120))")
+            #endif
+            return
+        }
+
+        switch m {
+        case 0:
+            SPIKEJSONParser.parseDeviceTelemetry(p, into: self)
+        case 2:
+            SPIKEJSONParser.parseBattery(p, into: self)
+        default:
+            #if DEBUG
+            print("EA RX: unhandled m=\(m)")
+            #endif
+        }
+    }
+
+    // MARK: - EA Motor Command Translation
+
+    /// Translate an LWP3 binary motor command into a JSON scratch command for EA transport.
+    private func translateLWP3ToEA(_ command: Data) {
+        // LWP3 port output command: [length, hubID, 0x81, portID, startup, subCmd, ...]
+        // Find the port output command payload
+        guard command.count >= 4 else { return }
+
+        let headerSize: Int
+        if command[0] & 0x80 != 0 {
+            headerSize = 4  // 2-byte length
+        } else {
+            headerSize = 3  // 1-byte length
+        }
+
+        guard command.count > headerSize else { return }
+        let messageType = command[headerSize - 1]
+        guard messageType == 0x81 else { return }  // port output command
+
+        let payloadStart = headerSize
+        guard command.count > payloadStart + 2 else { return }
+        let portID = command[payloadStart]
+        // startup+completion at payloadStart+1
+        let subCommand = command[payloadStart + 2]
+
+        switch subCommand {
+        case 0x01: // startPower (raw PWM — works for motors, lights, and other devices)
+            guard command.count > payloadStart + 3 else { return }
+            let power = Int8(bitPattern: command[payloadStart + 3])
+            sendPWMCommandEA(port: portID, power: Int(power))
+
+        case 0x07: // startSpeed (PID-controlled — motors only)
+            guard command.count > payloadStart + 3 else { return }
+            let speed = Int8(bitPattern: command[payloadStart + 3])
+            sendMotorCommandEA(port: portID, speed: Int(speed))
+
+        default:
+            #if DEBUG
+            print("EA: Unsupported LWP3 subcommand 0x\(String(format: "%02X", subCommand))")
+            #endif
+        }
+    }
+
+    /// Send a raw PWM power command (works for motors, lights, and other devices).
+    private func sendPWMCommandEA(port: UInt8, power: Int) {
+        let msgID = UUID().uuidString
+        let portLetter = Self.portLetter(port)
+        if power == 0 {
+            let cmd = "{\"i\":\"\(msgID)\",\"m\":\"scratch.motor_stop\",\"p\":{\"port\":\"\(portLetter)\",\"stop\":1}}"
+            sendEACommand(cmd)
+        } else {
+            let clampedPower = max(-100, min(100, power))
+            let cmd = "{\"i\":\"\(msgID)\",\"m\":\"scratch.motor_pwm\",\"p\":{\"port\":\"\(portLetter)\",\"power\":\(clampedPower),\"stall\":false}}"
+            sendEACommand(cmd)
+        }
+    }
+
+    /// Send a PID-controlled speed command (motors only).
+    private func sendMotorCommandEA(port: UInt8, speed: Int) {
+        let msgID = UUID().uuidString
+        let portLetter = Self.portLetter(port)
+        if speed == 0 {
+            let cmd = "{\"i\":\"\(msgID)\",\"m\":\"scratch.motor_stop\",\"p\":{\"port\":\"\(portLetter)\",\"stop\":1}}"
+            sendEACommand(cmd)
+        } else {
+            let clampedSpeed = max(-100, min(100, speed))
+            let cmd = "{\"i\":\"\(msgID)\",\"m\":\"scratch.motor_start\",\"p\":{\"port\":\"\(portLetter)\",\"speed\":\(clampedSpeed),\"stall\":true}}"
+            sendEACommand(cmd)
+        }
+    }
+
+    #endif  // os(iOS)
 }
 
+// MARK: - StreamDelegate (EA)
 
+#if os(iOS)
+extension RIHub: StreamDelegate {
+    func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
+        switch eventCode {
+        case .hasBytesAvailable:
+            readEAData()
+
+        case .hasSpaceAvailable:
+            flushEAWriteBuffer()
+
+        case .errorOccurred:
+            #if DEBUG
+            print("EA: Stream error — \(aStream.streamError?.localizedDescription ?? "unknown")")
+            #endif
+            disconnectEA()
+
+        case .endEncountered:
+            #if DEBUG
+            print("EA: Stream ended")
+            #endif
+            disconnectEA()
+
+        default:
+            break
+        }
+    }
+}
+#endif
