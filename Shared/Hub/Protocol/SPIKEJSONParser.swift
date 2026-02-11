@@ -126,6 +126,32 @@ struct SPIKEJSONParser {
             // Other device types: still tracked in attachedDevices via `devices` dict
         }
 
+        // Parse hub-level telemetry (p[6..10])
+        var accel: SPIKEDeviceNotification.Accelerometer?
+        var gyro: SPIKEDeviceNotification.Gyroscope?
+        var orient: SPIKEDeviceNotification.Orientation?
+        var display: SPIKEDeviceNotification.HubDisplay?
+        var gesture: SPIKEDeviceNotification.Gesture?
+
+        if params.count > 6, let arr = params[6] as? [Any], arr.count >= 3,
+           let x = intValue(arr[0]), let y = intValue(arr[1]), let z = intValue(arr[2]) {
+            accel = SPIKEDeviceNotification.Accelerometer(x: x, y: y, z: z)
+        }
+        if params.count > 7, let arr = params[7] as? [Any], arr.count >= 3,
+           let x = intValue(arr[0]), let y = intValue(arr[1]), let z = intValue(arr[2]) {
+            gyro = SPIKEDeviceNotification.Gyroscope(x: x, y: y, z: z)
+        }
+        if params.count > 8, let arr = params[8] as? [Any], arr.count >= 3,
+           let y = intValue(arr[0]), let p = intValue(arr[1]), let r = intValue(arr[2]) {
+            orient = SPIKEDeviceNotification.Orientation(yaw: y, pitch: p, roll: r)
+        }
+        if params.count > 9, let str = params[9] as? String {
+            display = SPIKEDeviceNotification.HubDisplay(pixels: str)
+        }
+        if params.count > 10, let code = intValue(params[10]) {
+            gesture = SPIKEDeviceNotification.Gesture(code: code)
+        }
+
         // Update hub state atomically
         hub.dataLock.lock()
         hub.spikeMotors = motors
@@ -134,6 +160,11 @@ struct SPIKEJSONParser {
         hub.spikeForces = forces
         hub.spikeLightMatrices = lightMatrices
         hub.attachedDevices = devices
+        hub.hubAccelerometer = accel
+        hub.hubGyroscope = gyro
+        hub.hubOrientation = orient
+        hub.hubDisplay = display
+        hub.hubGesture = gesture
         hub.dataLock.unlock()
 
         DispatchQueue.main.async {

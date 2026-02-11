@@ -237,6 +237,13 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
     var spikeForces: [UInt8: SPIKEDeviceNotification.Force] = [:]
     var spikeLightMatrices: [UInt8: SPIKEDeviceNotification.LightMatrix] = [:]
 
+    // Hub-level IMU / display / gesture state (populated from EA JSON telemetry p[6..10]).
+    var hubAccelerometer: SPIKEDeviceNotification.Accelerometer?
+    var hubGyroscope: SPIKEDeviceNotification.Gyroscope?
+    var hubOrientation: SPIKEDeviceNotification.Orientation?
+    var hubDisplay: SPIKEDeviceNotification.HubDisplay?
+    var hubGesture: SPIKEDeviceNotification.Gesture?
+
     /// Battery level as integer percentage (0–100), or nil if not yet received.
     var batteryLevel: Int? {
         batteryv > 0 ? Int(batteryv) : nil
@@ -253,7 +260,12 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
             forces: spikeForces,
             lightMatrices: spikeLightMatrices,
             lwp3Devices: attachedDevices,
-            lwp3PortValues: lwp3PortValues
+            lwp3PortValues: lwp3PortValues,
+            hubAccelerometer: hubAccelerometer,
+            hubGyroscope: hubGyroscope,
+            hubOrientation: hubOrientation,
+            hubDisplay: hubDisplay,
+            hubGesture: hubGesture
         )
     }
 
@@ -267,6 +279,13 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         let lwp3Devices: [UInt8: UInt16]
         /// LWP3 port value data: port ID → latest raw value bytes.
         let lwp3PortValues: [UInt8: Data]
+
+        // Hub-level telemetry
+        let hubAccelerometer: SPIKEDeviceNotification.Accelerometer?
+        let hubGyroscope: SPIKEDeviceNotification.Gyroscope?
+        let hubOrientation: SPIKEDeviceNotification.Orientation?
+        let hubDisplay: SPIKEDeviceNotification.HubDisplay?
+        let hubGesture: SPIKEDeviceNotification.Gesture?
 
         /// External ports with device data (SPIKE or LWP3).
         var activePorts: [UInt8] {
@@ -457,6 +476,11 @@ class RIHub : NSObject, CBPeripheralDelegate /*, Hashable */, ObservableObject {
         spikeColors.removeAll()
         spikeForces.removeAll()
         spikeLightMatrices.removeAll()
+        hubAccelerometer = nil
+        hubGyroscope = nil
+        hubOrientation = nil
+        hubDisplay = nil
+        hubGesture = nil
         resetDevice()
     }
 

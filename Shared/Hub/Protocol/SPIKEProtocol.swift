@@ -200,6 +200,42 @@ struct SPIKEDeviceNotification {
         let pixels: [UInt8]  // 9 brightness values (0–100), row-major 3x3
     }
 
+    struct Accelerometer {
+        let x: Int  // mG
+        let y: Int
+        let z: Int
+    }
+
+    struct Gyroscope {
+        let x: Int  // deg/s
+        let y: Int
+        let z: Int
+    }
+
+    struct Orientation {
+        let yaw: Int    // degrees
+        let pitch: Int
+        let roll: Int
+    }
+
+    struct HubDisplay {
+        let pixels: String  // "XXXXX:XXXXX:XXXXX:XXXXX:XXXXX" or "" for all off
+    }
+
+    struct Gesture {
+        let code: Int  // 0=tapped, 1=doubletapped, 2=shake, 3=freefall
+
+        var name: String {
+            switch code {
+            case 0: return "Tapped"
+            case 1: return "Double-Tapped"
+            case 2: return "Shake"
+            case 3: return "Freefall"
+            default: return "Unknown(\(code))"
+            }
+        }
+    }
+
     let battery: Battery?
     let motors: [Motor]
     let distances: [Distance]

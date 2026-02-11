@@ -131,6 +131,27 @@ struct ConnectedView: View {
 
             Divider()
 
+            // Hub state section (IMU, display, gesture)
+            if snap.hubOrientation != nil || snap.hubDisplay != nil {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let orient = snap.hubOrientation {
+                        OrientationRowView(orientation: orient)
+                    }
+                    if let accel = snap.hubAccelerometer, let gyro = snap.hubGyroscope {
+                        IMURowView(accelerometer: accel, gyroscope: gyro)
+                    }
+                    if let display = snap.hubDisplay, !display.pixels.isEmpty {
+                        HubDisplayView(display: display)
+                    }
+                    if let gesture = snap.hubGesture, gesture.code > 0 {
+                        GestureRowView(gesture: gesture)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 4)
+                Divider()
+            }
+
             // Per-port device rows
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
@@ -257,6 +278,11 @@ struct MotorRowView: View {
 
     @State private var sliderSpeed: Double = 0
 
+    /// Simple motors (type 1, 2) have no position encoder.
+    private var hasPosition: Bool {
+        motor.deviceType != 1 && motor.deviceType != 2
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             Text("Motor")
@@ -264,8 +290,10 @@ struct MotorRowView: View {
                 .font(.subheadline)
             Text("spd:\(motor.speed)")
                 .font(.system(.subheadline, design: .monospaced))
-            Text("pos:\(motor.position)")
-                .font(.system(.subheadline, design: .monospaced))
+            if hasPosition {
+                Text("pos:\(motor.position)")
+                    .font(.system(.subheadline, design: .monospaced))
+            }
 
             if let hub = hub, hub.canControlMotors {
                 Slider(value: $sliderSpeed, in: -100...100, step: 1) {
@@ -313,12 +341,33 @@ struct DistanceRowView: View {
 struct ColorRowView: View {
     let color: SPIKEDeviceNotification.Color
 
+    /// LEGO color ID → display name.
+    private static let colorNames: [Int8: String] = [
+        0: "Black", 1: "Pink", 2: "Purple", 3: "Blue",
+        4: "Lt Blue", 5: "Cyan", 6: "Green", 7: "Yellow",
+        8: "Orange", 9: "Red", 10: "White"
+    ]
+
+    /// LEGO color ID → swatch color (used when RGB values aren't available).
+    private static let colorSwatches: [Int8: SwiftUI.Color] = [
+        0: .black, 1: .pink, 2: .purple, 3: .blue,
+        4: SwiftUI.Color(red: 0.4, green: 0.7, blue: 1.0),
+        5: SwiftUI.Color(red: 0.0, green: 0.9, blue: 0.9), 6: .green, 7: .yellow,
+        8: .orange, 9: .red, 10: .white
+    ]
+
     private var swatchColor: SwiftUI.Color {
-        SwiftUI.Color(
-            red: Double(color.red) / 1024.0,
-            green: Double(color.green) / 1024.0,
-            blue: Double(color.blue) / 1024.0
-        )
+        // If we have real RGB data (SPIKE color sensor), use it
+        if color.red > 0 || color.green > 0 || color.blue > 0 {
+            let maxVal = max(Double(color.red), Double(color.green), Double(color.blue), 1)
+            return SwiftUI.Color(
+                red: Double(color.red) / maxVal,
+                green: Double(color.green) / maxVal,
+                blue: Double(color.blue) / maxVal
+            )
+        }
+        // Otherwise use the color ID lookup
+        return Self.colorSwatches[color.colorID] ?? .gray
     }
 
     var body: some View {
@@ -329,8 +378,9 @@ struct ColorRowView: View {
             Circle()
                 .fill(swatchColor)
                 .frame(width: 12, height: 12)
-            if color.colorID >= 0 {
-                Text("id:\(color.colorID)")
+                .overlay(Circle().stroke(Color.secondary.opacity(0.3), lineWidth: 0.5))
+            if color.colorID >= 0, let name = Self.colorNames[color.colorID] {
+                Text(name)
                     .font(.system(.subheadline, design: .monospaced))
             } else {
                 Text("—")
@@ -381,6 +431,90 @@ struct LightMatrixRowView: View {
                     }
                 }
             }
+        }
+    }
+}
+
+// MARK: - Hub State Views
+
+struct OrientationRowView: View {
+    let orientation: SPIKEDeviceNotification.Orientation
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Label("Orientation", systemImage: "gyroscope")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .labelStyle(.iconOnly)
+            Text("Yaw: \(orientation.yaw)\u{00B0}")
+                .font(.system(.subheadline, design: .monospaced))
+            Text("Pitch: \(orientation.pitch)\u{00B0}")
+                .font(.system(.subheadline, design: .monospaced))
+            Text("Roll: \(orientation.roll)\u{00B0}")
+                .font(.system(.subheadline, design: .monospaced))
+        }
+    }
+}
+
+struct IMURowView: View {
+    let accelerometer: SPIKEDeviceNotification.Accelerometer
+    let gyroscope: SPIKEDeviceNotification.Gyroscope
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("Accel: \(accelerometer.x), \(accelerometer.y), \(accelerometer.z)")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.secondary)
+            Text("Gyro: \(gyroscope.x), \(gyroscope.y), \(gyroscope.z)")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.secondary)
+        }
+    }
+}
+
+struct HubDisplayView: View {
+    let display: SPIKEDeviceNotification.HubDisplay
+
+    /// Parse the "XXXXX:XXXXX:XXXXX:XXXXX:XXXXX" string into a 5x5 brightness grid.
+    private var rows: [[Int]] {
+        display.pixels.split(separator: ":").map { row in
+            row.compactMap { char in
+                char.wholeNumberValue
+            }
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("Display")
+                .foregroundColor(.secondary)
+                .font(.subheadline)
+            VStack(spacing: 1) {
+                ForEach(0..<rows.count, id: \.self) { r in
+                    HStack(spacing: 1) {
+                        ForEach(0..<rows[r].count, id: \.self) { c in
+                            let brightness = Double(rows[r][c]) / 9.0
+                            Circle()
+                                .fill(Color.white.opacity(brightness))
+                                .frame(width: 5, height: 5)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct GestureRowView: View {
+    let gesture: SPIKEDeviceNotification.Gesture
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "hand.tap.fill")
+                .font(.subheadline)
+                .foregroundColor(.yellow)
+            Text(gesture.name)
+                .font(.subheadline)
         }
     }
 }
